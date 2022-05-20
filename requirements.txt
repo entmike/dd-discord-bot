@@ -1,0 +1,6 @@
+--pre
+py-cord==2.0.0b1
+python-dotenv
+pydotted
+loguru
+git+https://github.com/dimitrismistriotis/profanity-check
