@@ -23,9 +23,40 @@ ticks = 0
 async def task_loop():
     global ticks
     ticks += 1
+    with open("queue.yaml", "r") as queue:
+        arr = full_load(queue)
 
-    print(ticks)
-    channel = discord.utils.get(bot.get_all_channels(), name="general")
+    for job in arr:
+        if job["status"] == "complete":
+            channel = discord.utils.get(bot.get_all_channels(), name="general")
+            embed = discord.Embed(
+                title=f"Job {job['uuid']}",
+                description=job["text_prompt"],
+                color=discord.Colour.blurple(),  # Pycord provides a class with default colors you can choose from
+            )
+            embed.set_author(
+                name="Fever Dream",
+                icon_url="https://cdn.howles.cloud/icon.png",
+            )
+
+            view = discord.ui.View()
+
+            async def loveCallback(interaction):
+                await interaction.response.edit_message(content="💖", view=view)
+
+            async def hateCallback(interaction):
+                await interaction.response.edit_message(content="😢", view=view)
+
+            loveButton = discord.ui.Button(label="Love it", style=discord.ButtonStyle.green, emoji="😍")
+            loveButton.callback = loveCallback
+            hateButton = discord.ui.Button(label="Hate it", style=discord.ButtonStyle.danger, emoji="😢")
+            hateButton.callback = hateCallback
+            view.add_item(loveButton)
+            view.add_item(hateButton)
+            file = discord.File(f"images/{job['filename']}", filename=job["filename"])
+            embed.set_image(url=f"attachment://{job['filename']}")
+
+            await channel.send("Completed render", embed=embed, view=view, file=file)
 
     # agents = open("agents.txt","r").read()
     # if agents != oldagents:
