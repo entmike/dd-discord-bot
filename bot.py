@@ -26,6 +26,7 @@ async def task_loop():
 
     print(ticks)
     channel = discord.utils.get(bot.get_all_channels(), name="general")
+
     # agents = open("agents.txt","r").read()
     # if agents != oldagents:
     #   await channel.send("New render agent found.")
@@ -167,9 +168,11 @@ async def agents(ctx):
         description="The following agents are running",
         color=discord.Colour.blurple(),  # Pycord provides a class with default colors you can choose from
     )
-    agents = open("agents.txt", "r").read().split("\n")
-    for a, agent in enumerate(agents):
-        embed.add_field(name=a, value=f"- {agent}", inline=False)
+    with open("agents.yaml", "r") as queue:
+        arr = full_load(queue)
+
+    for a, agent in enumerate(arr):
+        embed.add_field(name=agent["agent_id"], value=f"- {agent['gpu']}", inline=False)
     await ctx.respond(embed=embed)
 
 
