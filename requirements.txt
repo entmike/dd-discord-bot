@@ -1,6 +1,11 @@
 --pre
-py-cord==2.0.0b1
+py-cord==2.0.0rc1
 python-dotenv
 pydotted
 loguru
+flask
+pandas
+watchdog
+pyyaml
+black
 git+https://github.com/dimitrismistriotis/profanity-check
