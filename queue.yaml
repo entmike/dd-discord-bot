@@ -1,0 +1,10 @@
+- author: someoneelse#1926
+  status: queued
+  steps: 150
+  text_prompt: someone elses job
+  uuid: xyzabc
+- author: entmike#1926
+  status: queued
+  steps: 150
+  text_prompt: lighthouses on artstation
+  uuid: 871edeb3-2d1f-4d98-998e-a2c98590a2b8
