@@ -8,4 +8,6 @@ pandas
 watchdog
 pyyaml
 black
+pymongo
+dnspython
 git+https://github.com/dimitrismistriotis/profanity-check
