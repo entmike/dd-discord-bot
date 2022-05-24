@@ -11,4 +11,4 @@ black
 pymongo
 dnspython
 waitress
-git+https://github.com/dimitrismistriotis/profanity-check
+# git+https://github.com/dimitrismistriotis/profanity-check

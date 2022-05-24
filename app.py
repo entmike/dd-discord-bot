@@ -57,6 +57,21 @@ def register(agent_id):
     return status
 
 
+@app.route("/reject/<agent_id>/<job_uuid>", methods=["POST"])
+def reject(agent_id, job_uuid):
+    print (f"rejecting {job_uuid}")
+    if request.method == "POST":
+        with get_database() as client:
+            queueCollection = client.database.get_collection("queue")
+            results = queueCollection.update_one({
+                "agent_id": agent_id, 
+                "uuid": job_uuid}, {"$set": {"status": "rejected", "filename": None}})
+            count = results.modified_count
+        if count == 0:
+            return f"cannot find that job."
+        else:
+            return f"job rejected, {agent_id}."
+
 @app.route("/upload/<agent_id>/<job_uuid>", methods=["GET", "POST"])
 def upload_file(agent_id, job_uuid):
     if request.method == "POST":

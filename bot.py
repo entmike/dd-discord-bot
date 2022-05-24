@@ -1,4 +1,5 @@
 import datetime
+from random import choices
 import discord, os, subprocess
 from discord.ext import tasks
 from dotenv import load_dotenv
@@ -8,8 +9,10 @@ from loguru import logger
 import time
 from yaml import dump, full_load
 import uuid
-
+from bson import Binary, Code
+from bson.json_util import dumps
 import warnings
+import json
 
 from db import get_database
 
@@ -135,6 +138,20 @@ async def render(
     ctx,
     text_prompt: discord.Option(str, "Enter your text prompt", required=False, default="lighthouses on artstation"),
     steps: discord.Option(int, "Number of steps", required=False, default=150),
+    shape: discord.Option(str, "Image Shape", required=False, default="landscape", choices=[
+        discord.OptionChoice("Landscape", value="landscape"),
+        discord.OptionChoice("Portrait", value="portrait"),
+        discord.OptionChoice("Square", value="square"),
+        discord.OptionChoice("Panoramic", value="pano")
+    ]),
+    model: discord.Option(str, "Models", required=False, default="default", choices=[
+        discord.OptionChoice("Default (ViTL16+32, RN50)", value="default"),
+        discord.OptionChoice("ViTL16+32, RN50x64", value="rn50x64"),
+        discord.OptionChoice("ViTL16+32+14", value="vitl14"),
+        discord.OptionChoice("ViTL16+32+14x336", value="vitl14x336"),
+    ]),
+    clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False, default=1500),
+    cut_ic_pow: discord.Option(int, "CLIP Innercut Power", required=False, default=1),
 ):
     reject = False
     reasons = []
@@ -156,7 +173,17 @@ async def render(
     if not reject:
         with get_database() as client:
             job_uuid = str(uuid.uuid4())
-            record = {"uuid": job_uuid, "text_prompt": text_prompt, "steps": steps, "author": int(ctx.author.id), "status": "queued", "timestamp": datetime.datetime.utcnow()}
+            record = {
+                "uuid": job_uuid, 
+                "text_prompt": text_prompt, 
+                "steps": steps, 
+                "shape": shape, 
+                "model": model,
+                "clip_guidance_scale": clip_guidance_scale,
+                "cut_ic_pow": cut_ic_pow,
+                "author": int(ctx.author.id),
+                "status": "queued",
+                "timestamp": datetime.datetime.utcnow()}
             queueCollection = client.database.get_collection("queue")
             queueCollection.insert_one(record)
             await ctx.respond(f"✅ Request added to DB")
@@ -183,11 +210,45 @@ async def remove(ctx, uuid):
         else:
             await ctx.respond(f"🗑️ Job removed.")
 
+@bot.command(description="Retry a render request")
+async def retry(ctx, uuid):
+    with get_database() as client:
+        result = client.database.get_collection("queue").update_one({"uuid": uuid, "author": int(ctx.author.id)}, {"$set": {"status": "queued"}})
+        count = result.modified_count
+
+        if count == 0:
+            await ctx.respond(f"❌ Cannot retry {uuid}")
+        else:
+            await ctx.respond(f"💼 Job marked for retry.")
+
+@bot.command(description="Repeat a render request")
+async def repeat(ctx, job_uuid):
+    with get_database() as client:
+        result = client.database.get_collection("queue").find_one({"uuid": job_uuid}, {'_id': 0})
+        new_uuid = str(uuid.uuid4())
+        result["uuid"] = new_uuid
+        result["status"] = 'queued'
+        result["author"] = int(ctx.author.id)
+        result = client.database.get_collection("queue").insert_one(result)
+        insertID = result
+
+        if not insertID:
+            await ctx.respond(f"❌ Cannot repeat {uuid}")
+        else:
+            await ctx.respond(f"💼 Job marked for a repeat run.  New uuid: `{new_uuid}`")
+
+@bot.command(description="Get details of a render request")
+async def query(ctx, uuid):
+    with get_database() as client:
+        result = client.database.get_collection("queue").find_one({"uuid": uuid})
+        await ctx.respond(f"""```
+        {json.loads(dumps(result))}
+        ```""")
 
 @bot.command(description="View next 5 render queue entries")
 async def queue(ctx):
     with get_database() as client:
-        queue = client.database.get_collection("queue").find({"$query": {"status": {"$ne": "archived"}}, "$orderby": {"timestamp": -1}}).limit(5)
+        queue = client.database.get_collection("queue").find({"$query": {"status": {"$nin": ["archived","rejected"]}}, "$orderby": {"timestamp": -1}}).limit(5)
         # https://docs.pycord.dev/en/master/api.html?highlight=embed#discord.Embed
         embed = discord.Embed(
             title="Request Queue",
