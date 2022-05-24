@@ -24,10 +24,24 @@ ticks = 0
 # this code will be executed every 10 seconds after the bot is ready
 @tasks.loop(seconds=10)
 async def task_loop():
+    channel = discord.utils.get(bot.get_all_channels(), name="general")
     global ticks
     ticks += 1
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
+        messageCollection = client.database.get_collection("logs")
+        messages = messageCollection.find({"$query": {"ack": {"$ne": True}}})
+        for message in messages:
+            title = "Message"
+            if message.get("title"):
+                title = message.get(title)
+            embed = discord.Embed(
+                title=title,
+                description=message.get("message"),
+                color=discord.Colour.blurple(),  # Pycord provides a class with default colors you can choose from
+            )
+            await channel.send(embed=embed)
+            results = messageCollection.update_one({"uuid": message.get("uuid")}, {"$set": {"ack": True}})
         query = {"status": "complete"}
         completed = queueCollection.count_documents(query)
         if completed == 0:
@@ -35,7 +49,6 @@ async def task_loop():
             return
         else:
             completedJob = queueCollection.find_one(query)
-            channel = discord.utils.get(bot.get_all_channels(), name="general")
             embed = discord.Embed(
                 title=f"Job {completedJob.get('uuid')}",
                 description=completedJob.get("text_prompt"),
@@ -54,12 +67,12 @@ async def task_loop():
             async def hateCallback(interaction):
                 await interaction.response.edit_message(content="😢", view=view)
 
-            loveButton = discord.ui.Button(label="Love it", style=discord.ButtonStyle.green, emoji="😍")
-            loveButton.callback = loveCallback
-            hateButton = discord.ui.Button(label="Hate it", style=discord.ButtonStyle.danger, emoji="😢")
-            hateButton.callback = hateCallback
-            view.add_item(loveButton)
-            view.add_item(hateButton)
+            # loveButton = discord.ui.Button(label="Love it", style=discord.ButtonStyle.green, emoji="😍")
+            # loveButton.callback = loveCallback
+            # hateButton = discord.ui.Button(label="Hate it", style=discord.ButtonStyle.danger, emoji="😢")
+            # hateButton.callback = hateCallback
+            # view.add_item(loveButton)
+            # view.add_item(hateButton)
             file = discord.File(f"images/{completedJob.get('filename')}", filename=completedJob.get("filename"))
             embed.set_image(url=f"attachment://{completedJob.get('filename')}")
             results = queueCollection.update_one({"uuid": completedJob.get("uuid")}, {"$set": {"status": "archived"}})
@@ -117,7 +130,7 @@ async def gtn(ctx):
             await ctx.send("Nope, try again.")
 
 
-@bot.command()
+@bot.command(description="Submit a Disco Diffusion Render Request")
 async def render(
     ctx,
     text_prompt: discord.Option(str, "Enter your text prompt", required=False, default="lighthouses on artstation"),
@@ -125,10 +138,9 @@ async def render(
 ):
     reject = False
     reasons = []
-    authorCount = 0
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
-        query = {"author": str(ctx.author)}
+        query = {"author": int(ctx.author.id), "status": {"$ne": "archived"}}
         jobCount = queueCollection.count_documents(query)
         if jobCount >= AUTHOR_LIMIT:
             reject = True
@@ -144,7 +156,7 @@ async def render(
     if not reject:
         with get_database() as client:
             job_uuid = str(uuid.uuid4())
-            record = {"uuid": job_uuid, "text_prompt": text_prompt, "steps": steps, "author": str(ctx.author), "status": "queued", "timestamp": datetime.datetime.utcnow()}
+            record = {"uuid": job_uuid, "text_prompt": text_prompt, "steps": steps, "author": int(ctx.author.id), "status": "queued", "timestamp": datetime.datetime.utcnow()}
             queueCollection = client.database.get_collection("queue")
             queueCollection.insert_one(record)
             await ctx.respond(f"✅ Request added to DB")
@@ -153,23 +165,29 @@ async def render(
         await ctx.respond("\n".join(reasons))
 
 
-@bot.command()
-async def remove(ctx, uuid):
-    author = str(ctx.author)
+@bot.command(description="Nuke Render Queue (debug)")
+async def nuke(ctx):
     with get_database() as client:
-        result = client.database.get_collection("queue").delete_many({"author": author, "uuid": uuid})
+        result = client.database.get_collection("queue").delete_many({"status": {"$ne": "archived"}})
+    await ctx.respond(f"✅ Queue nuked.")
+
+
+@bot.command(description="Remove a render request")
+async def remove(ctx, uuid):
+    with get_database() as client:
+        result = client.database.get_collection("queue").delete_many({"author": int(ctx.author.id), "uuid": uuid, "status": "queued"})
         count = result.deleted_count
 
         if count == 0:
-            await ctx.respond(f"❌ Could not delete job `{uuid}`.  Check the Job ID and if you are the owner.")
+            await ctx.respond(f"❌ Could not delete job `{uuid}`.  Check the Job ID and if you are the owner, and that your job has not started running yet.")
         else:
             await ctx.respond(f"🗑️ Job removed.")
 
 
-@bot.command()
+@bot.command(description="View next 5 render queue entries")
 async def queue(ctx):
     with get_database() as client:
-        queue = client.database.get_collection("queue").find({"$query": {"status": {"$ne": "archived"}}, "$orderby": {"timestamp": -1}})
+        queue = client.database.get_collection("queue").find({"$query": {"status": {"$ne": "archived"}}, "$orderby": {"timestamp": -1}}).limit(5)
         # https://docs.pycord.dev/en/master/api.html?highlight=embed#discord.Embed
         embed = discord.Embed(
             title="Request Queue",
@@ -177,8 +195,9 @@ async def queue(ctx):
             color=discord.Colour.blurple(),  # Pycord provides a class with default colors you can choose from
         )
         for j, job in enumerate(queue):
+            user = await bot.fetch_user(job.get("author"))
             summary = f"""
-            - 🧑‍🦲 Author: `{job.get('author')}`
+            - 🧑‍🦲 Author: <@{job.get('author')}>
             - ✍️ Text Prompt: `{job.get('text_prompt')}`
             - Status: `{job.get('status')}`
             - Timestamp: `{job.get('timestamp')}`

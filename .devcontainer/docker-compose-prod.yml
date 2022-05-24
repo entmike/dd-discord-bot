@@ -1,0 +1,25 @@
+version: '3'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+    - 5000:8080
+    volumes:
+      - ..:/workspace:cached
+    command: /bin/bash -c "source /workspace/.venv/dd-discord-bot/bin/activate && cd /workspace && pip install -r requirements.txt && python serve.py"
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ..:/workspace:cached
+    command: /bin/bash -c "source /workspace/.venv/dd-discord-bot/bin/activate && cd /workspace && pip install -r requirements.txt && python bot.py"
+
+  mongodb:
+    image: mongo:latest
+    hostname: mongodb
+    restart: unless-stopped
+    # As in the "app" service, use "forwardPorts" in **devcontainer.json** to forward an app port locally.

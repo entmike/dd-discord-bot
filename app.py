@@ -8,6 +8,8 @@ import hashlib
 from datetime import datetime
 from bson import Binary, Code
 from bson.json_util import dumps
+import uuid
+import json
 
 # https://iq-inc.com/wp-content/uploads/2021/02/AndyRelativeImports-300x294.jpg
 sys.path.append(".")
@@ -26,11 +28,13 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def log(message):
+def log(message, title="Message"):
     with get_database() as client:
-        logTable = client.database.get_collection("log")
-        logTable.insert_one({"timestamp": datetime.now(), "message": message, "ack": False})
+        logTable = client.database.get_collection("logs")
+        logTable.insert_one({"timestamp": datetime.now(), "message": message, "title": title, "ack": False, "uuid": str(uuid.uuid4())})
 
+# @app.route("/job/<job_uuid>")
+# def job(job_uuid):
 
 @app.route("/register/<agent_id>")
 def register(agent_id):
@@ -47,7 +51,7 @@ def register(agent_id):
             token = hashlib.sha256(f"{agent_id}{salt}".encode("utf-8")).hexdigest()
             agentCollection.insert_one({"agent_id": agent_id, "last_seen": datetime.now()})
             status = f"✅ Registered!  Your API token is '{token}'.  Save this, you won't see it again."
-            log(f"A new agent has joined! 😍 Thank you, {agent_id}!")
+            log(f"A new agent has joined! 😍 Thank you, {agent_id}!", title="🆕 New Agent")
         else:
             status = f"😓 Sorry, someone already registered an agent by that name.  Try another one!"
     return status
@@ -71,7 +75,9 @@ def upload_file(agent_id, job_uuid):
             file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
             with get_database() as client:
                 queueCollection = client.database.get_collection("queue")
-                results = queueCollection.update_one({"agent_id": agent_id, "uuid": job_uuid}, {"$set": {"status": "complete", "filename": filename}})
+                results = queueCollection.update_one({
+                    "agent_id": agent_id, 
+                    "uuid": job_uuid}, {"$set": {"status": "complete", "filename": filename}})
                 count = results.modified_count
             if count == 0:
                 return f"cannot find that job."
@@ -115,16 +121,21 @@ def takeorder(agent_id):
         jobCount = queueCollection.count_documents(query)
         if jobCount > 0:
             jobs = queueCollection.find_one(query)
-            return dumps({"message ": f"You already have a job.  (Job '{jobs.get('uuid')}')", "uuid": jobs.get("uuid"), "success": True})
+            return dumps({"message ": f"You already have a job.  (Job '{jobs.get('uuid')}')", 
+            "uuid": jobs.get("uuid"), 
+            "details":json.loads(dumps(jobs)),
+            "success": True
+            })
         else:
             query = {"status": "queued"}
             queueCount = queueCollection.count_documents(query)
             if queueCount > 0:
-                job_uuid = queueCollection.find_one({"$query": query, "$orderby": {"timestamp": 1}})["uuid"]
-                results = queueCollection.update_one({"uuid": job_uuid}, {"$set": {"status": "processing", "agent_id": agent_id}})
+                job = queueCollection.find_one({"$query": query, "$orderby": {"timestamp": 1}})
+                results = queueCollection.update_one({"uuid": job.get("uuid")}, {"$set": {"status": "processing", "agent_id": agent_id}})
                 count = results.modified_count
                 if count > 0:
-                    return dumps({"message": f"Your current job is {job_uuid}.", "uuid": jobs.get("uuid"), "success": True})
+                    log(f"Good news, <@{job.get('author')}>!  Your job `{job.get('uuid')}` is being processed now...", title="💼 Job in Process")
+                    return dumps({"message": f"Your current job is {job.get('uuid')}.", "uuid": job.get("uuid"), "details":json.loads(dumps(job)), "success": True})
                 else:
                     return dumps({"message": f"Could not secure a job.", "success": False})
 
