@@ -56,9 +56,15 @@ def register(agent_id):
             status = f"😓 Sorry, someone already registered an agent by that name.  Try another one!"
     return status
 
+def pulse(agent_id):
+    with get_database() as client:
+        agentCollection = client.database.get_collection("agents")
+        agentCollection.update_one({"agent_id": agent_id},
+        {"$set": {"last_seen": datetime.now()}})
 
 @app.route("/reject/<agent_id>/<job_uuid>", methods=["POST"])
 def reject(agent_id, job_uuid):
+    pulse(agent_id=agent_id)
     print (f"rejecting {job_uuid}")
     if request.method == "POST":
         with get_database() as client:
@@ -74,6 +80,7 @@ def reject(agent_id, job_uuid):
 
 @app.route("/upload/<agent_id>/<job_uuid>", methods=["GET", "POST"])
 def upload_file(agent_id, job_uuid):
+    pulse(agent_id=agent_id)
     if request.method == "POST":
         # check if the post request has the file part
         if "file" not in request.files:
@@ -130,6 +137,7 @@ def hello_world():
 
 @app.route("/takeorder/<agent_id>")
 def takeorder(agent_id):
+    pulse(agent_id=agent_id)
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
         query = {"status": "processing", "agent_id": agent_id}

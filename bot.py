@@ -27,11 +27,11 @@ ticks = 0
 # this code will be executed every 10 seconds after the bot is ready
 @tasks.loop(seconds=10)
 async def task_loop():
-    channel = discord.utils.get(bot.get_all_channels(), name="general")
     global ticks
     ticks += 1
+    image_channels = ["images", "general"]
+    botspam_channels = ["botspam"]
     with get_database() as client:
-        queueCollection = client.database.get_collection("queue")
         messageCollection = client.database.get_collection("logs")
         messages = messageCollection.find({"$query": {"ack": {"$ne": True}}})
         for message in messages:
@@ -43,51 +43,51 @@ async def task_loop():
                 description=message.get("message"),
                 color=discord.Colour.blurple(),  # Pycord provides a class with default colors you can choose from
             )
-            await channel.send(embed=embed)
-            results = messageCollection.update_one({"uuid": message.get("uuid")}, {"$set": {"ack": True}})
+            for channel in botspam_channels:
+                channel = discord.utils.get(bot.get_all_channels(), name=channel)
+                await channel.send(embed=embed)
+                messageCollection.update_one({"uuid": message.get("uuid")}, {"$set": {"ack": True}})
+        
+        
+        
         query = {"status": "complete"}
+        queueCollection = client.database.get_collection("queue")
         completed = queueCollection.count_documents(query)
         if completed == 0:
             # print("No new events.")
             return
         else:
             completedJob = queueCollection.find_one(query)
-            embed = discord.Embed(
-                title=f"Job {completedJob.get('uuid')}",
-                description=completedJob.get("text_prompt"),
-                color=discord.Colour.blurple(),  # Pycord provides a class with default colors you can choose from
-            )
-            embed.set_author(
-                name="Fever Dream",
-                icon_url="https://cdn.howles.cloud/icon.png",
-            )
+            for channel in image_channels:
+                channel = discord.utils.get(bot.get_all_channels(), name=channel)
+                embed = discord.Embed(
+                    title=f"Job {completedJob.get('uuid')}",
+                    description=completedJob.get("text_prompt"),
+                    color=discord.Colour.blurple(),  # Pycord provides a class with default colors you can choose from
+                )
+                embed.set_author(
+                    name="Fever Dream",
+                    icon_url="https://cdn.howles.cloud/icon.png",
+                )
 
-            view = discord.ui.View()
+                view = discord.ui.View()
 
-            async def loveCallback(interaction):
-                await interaction.response.edit_message(content="💖", view=view)
+                async def loveCallback(interaction):
+                    await interaction.response.edit_message(content="💖", view=view)
 
-            async def hateCallback(interaction):
-                await interaction.response.edit_message(content="😢", view=view)
+                async def hateCallback(interaction):
+                    await interaction.response.edit_message(content="😢", view=view)
 
-            # loveButton = discord.ui.Button(label="Love it", style=discord.ButtonStyle.green, emoji="😍")
-            # loveButton.callback = loveCallback
-            # hateButton = discord.ui.Button(label="Hate it", style=discord.ButtonStyle.danger, emoji="😢")
-            # hateButton.callback = hateCallback
-            # view.add_item(loveButton)
-            # view.add_item(hateButton)
-            file = discord.File(f"images/{completedJob.get('filename')}", filename=completedJob.get("filename"))
-            embed.set_image(url=f"attachment://{completedJob.get('filename')}")
-            results = queueCollection.update_one({"uuid": completedJob.get("uuid")}, {"$set": {"status": "archived"}})
-            await channel.send("Completed render", embed=embed, view=view, file=file)
-
-    # agents = open("agents.txt","r").read()
-    # if agents != oldagents:
-    #   await channel.send("New render agent found.")
-
-    # oldagents = agents
-    print(ticks)
-    # await channel.send("tick")
+                # loveButton = discord.ui.Button(label="Love it", style=discord.ButtonStyle.green, emoji="😍")
+                # loveButton.callback = loveCallback
+                # hateButton = discord.ui.Button(label="Hate it", style=discord.ButtonStyle.danger, emoji="😢")
+                # hateButton.callback = hateCallback
+                # view.add_item(loveButton)
+                # view.add_item(hateButton)
+                file = discord.File(f"images/{completedJob.get('filename')}", filename=completedJob.get("filename"))
+                embed.set_image(url=f"attachment://{completedJob.get('filename')}")
+                results = queueCollection.update_one({"uuid": completedJob.get("uuid")}, {"$set": {"status": "archived"}})
+                await channel.send(f"Completed render <@{completedJob.get('author')}>", embed=embed, view=view, file=file)
 
 
 bot = discord.Bot(debug_guilds=[945459234194219029])  # specify the guild IDs in debug_guilds
@@ -173,6 +173,7 @@ async def render(
     if not reject:
         with get_database() as client:
             job_uuid = str(uuid.uuid4())
+            text_prompt = text_prompt.replace(':','')
             record = {
                 "uuid": job_uuid, 
                 "text_prompt": text_prompt, 
@@ -198,6 +199,17 @@ async def nuke(ctx):
         result = client.database.get_collection("queue").delete_many({"status": {"$ne": "archived"}})
     await ctx.respond(f"✅ Queue nuked.")
 
+
+@bot.command(description="Remove a render request (intended for admins)")
+async def destroy(ctx, uuid):
+    with get_database() as client:
+        result = client.database.get_collection("queue").delete_many({"uuid": uuid})
+        count = result.deleted_count
+
+        if count == 0:
+            await ctx.respond(f"❌ Could not delete job `{uuid}`.  Check the Job ID.")
+        else:
+            await ctx.respond(f"🗑️ Job destroyed.")
 
 @bot.command(description="Remove a render request")
 async def remove(ctx, uuid):
@@ -245,6 +257,29 @@ async def query(ctx, uuid):
         {json.loads(dumps(result))}
         ```""")
 
+@bot.command(description="View queue statistics")
+async def queuestats(ctx):
+    embed = discord.Embed(
+        title="Queue Stats",
+        description="The following are the current queue statistics",
+        color=discord.Colour.blurple(),
+    )
+    with get_database() as client:
+        queueCollection = client.database.get_collection("queue")
+        # jobCount = queueCollection.count_documents({"status": {"$nin": ["archived","rejected"]}})
+        queuedCount = queueCollection.count_documents({"status": "queued"})
+        processingCount = queueCollection.count_documents({"status": "processing"})
+        renderedCount = queueCollection.count_documents({"status": "archived"})
+        rejectedCount = queueCollection.count_documents({"status": "rejected"})
+        summary = f"""
+        - ⚒️ Running: `{processingCount}`
+        - ⌛ Waiting: `{queuedCount}`
+        - 🖼️ Completed `{renderedCount}`
+        - 🪲 Rejected `{rejectedCount}`
+        """
+        embed.add_field(name="Queue Stats", value=summary, inline=False)
+        await ctx.respond(embed=embed)
+
 @bot.command(description="View next 5 render queue entries")
 async def queue(ctx):
     with get_database() as client:
@@ -273,7 +308,7 @@ async def agents(ctx):
     # https://docs.pycord.dev/en/master/api.html?highlight=embed#discord.Embed
     embed = discord.Embed(
         title="Agent Status",
-        description="The following agents are registered.",
+        description="The following agents appear active:",
         color=discord.Colour.blurple(),  # Pycord provides a class with default colors you can choose from
     )
 
@@ -281,7 +316,7 @@ async def agents(ctx):
         agents = client.database.get_collection("agents").find()
 
         for a, agent in enumerate(agents):
-            embed.add_field(name=agent.get("agent_id"), value=f"- {agent.get('gpu')}", inline=False)
+            embed.add_field(name=agent.get("agent_id"), value=f"- Last Seen: `{agent.get('last_seen')}`", inline=False)
         await ctx.respond(embed=embed)
 
 
