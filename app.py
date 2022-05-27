@@ -10,6 +10,7 @@ from bson import Binary, Code
 from bson.json_util import dumps
 import uuid
 import json
+from loguru import logger
 
 # https://iq-inc.com/wp-content/uploads/2021/02/AndyRelativeImports-300x294.jpg
 sys.path.append(".")
@@ -18,7 +19,7 @@ from db import get_database
 # load_dotenv()
 
 UPLOAD_FOLDER = "images"
-ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "log"}
 
 app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
@@ -32,6 +33,12 @@ def log(message, title="Message"):
     with get_database() as client:
         logTable = client.database.get_collection("logs")
         logTable.insert_one({"timestamp": datetime.now(), "message": message, "title": title, "ack": False, "uuid": str(uuid.uuid4())})
+
+def event(event):
+    with get_database() as client:
+        eventTable = client.database.get_collection("events")
+        eventTable.insert_one({"timestamp": datetime.now(), "ack": False, "uuid": str(uuid.uuid4()), "event" : event})
+    logger.info(f"Event logged: {event}")
 
 # @app.route("/job/<job_uuid>")
 # def job(job_uuid):
@@ -65,23 +72,73 @@ def pulse(agent_id):
 @app.route("/reject/<agent_id>/<job_uuid>", methods=["POST"])
 def reject(agent_id, job_uuid):
     pulse(agent_id=agent_id)
-    print (f"rejecting {job_uuid}")
+    logger.error(f"rejecting {job_uuid}")
     if request.method == "POST":
         with get_database() as client:
             queueCollection = client.database.get_collection("queue")
             results = queueCollection.update_one({
                 "agent_id": agent_id, 
-                "uuid": job_uuid}, {"$set": {"status": "rejected", "filename": None}})
+                "uuid": job_uuid}, {"$set": {"status": "failed", "filename": None}})
             count = results.modified_count
         if count == 0:
             return f"cannot find that job."
         else:
             return f"job rejected, {agent_id}."
 
+@app.route("/uploadlog/<agent_id>/<job_uuid>", methods=["POST"])
+def upload_log(agent_id, job_uuid):
+    file = request.files["file"]
+    filename = secure_filename(file.filename)
+    file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
+    with open(os.path.join(app.config["UPLOAD_FOLDER"], filename), "r") as f:
+        run_log = f.read()
+
+    with get_database() as client:
+        queueCollection = client.database.get_collection("queue")
+        results = queueCollection.update_one({
+            "agent_id": agent_id, 
+            "uuid": job_uuid}, {"$set": {"log": filename}})
+        count = results.modified_count
+        if count == 0:
+            return f"cannot find that job."
+        else:
+            return "Log uploaded."
+
+@app.route("/progress/<agent_id>/<job_uuid>", methods=["GET", "POST"])
+def progress(agent_id, job_uuid):
+    if request.method == "POST":
+        e = {
+            "type" : "progress",
+            "agent" : agent_id,
+            "job_uuid" : job_uuid,
+            "percent" : request.form.get('percent')
+        }
+        event(e)
+        logger.info(e)
+
+        with get_database() as client:
+            queueCollection = client.database.get_collection("queue")
+            results = queueCollection.update_one({
+                "agent_id": agent_id, 
+                "uuid": job_uuid}, {"$set": {"percent": request.form.get('percent')}})
+            count = results.modified_count
+            if count == 0:
+                return f"cannot find that job."
+            else:
+                return "Log uploaded."
+        
+    if request.method == "GET":
+        return "OK"
+
 @app.route("/upload/<agent_id>/<job_uuid>", methods=["GET", "POST"])
 def upload_file(agent_id, job_uuid):
     pulse(agent_id=agent_id)
     if request.method == "POST":
+        logger.info(request.form.get('duration'))
+        if request.form.get('duration'):
+            duration = float(request.form.get('duration'))
+        else:
+            duration = 0.0
         # check if the post request has the file part
         if "file" not in request.files:
             flash("No file part")
@@ -99,12 +156,22 @@ def upload_file(agent_id, job_uuid):
                 queueCollection = client.database.get_collection("queue")
                 results = queueCollection.update_one({
                     "agent_id": agent_id, 
-                    "uuid": job_uuid}, {"$set": {"status": "complete", "filename": filename}})
+                    "uuid": job_uuid}, {"$set": {"status": "complete", "filename": filename, "duration":duration}})
                 count = results.modified_count
             if count == 0:
                 return f"cannot find that job."
             else:
-                return f"thank you, {agent_id}."
+                with get_database() as client:
+                    agentCollection = client.database.get_collection("agents")
+                    results = agentCollection.find_one({"agent_id" : agent_id})
+                    score = results.get("score")
+                    if not score:
+                        score = 1
+                    else:
+                        score+=1
+                    results = agentCollection.update_one({
+                        "agent_id": agent_id}, {"$set": {"score": score}})
+                    return f"thank you, {agent_id}."
         else:
             return "Bad file."
     else:
@@ -157,16 +224,9 @@ def takeorder(agent_id):
                 results = queueCollection.update_one({"uuid": job.get("uuid")}, {"$set": {"status": "processing", "agent_id": agent_id}})
                 count = results.modified_count
                 if count > 0:
-                    log(f"Good news, <@{job.get('author')}>!  Your job `{job.get('uuid')}` is being processed now...", title="💼 Job in Process")
+                    log(f"Good news, <@{job.get('author')}>!  Your job `{job.get('uuid')}` is being processed now by `{agent_id}`...", title="💼 Job in Process")
                     return dumps({"message": f"Your current job is {job.get('uuid')}.", "uuid": job.get("uuid"), "details":json.loads(dumps(job)), "success": True})
                 else:
                     return dumps({"message": f"Could not secure a job.", "success": False})
 
     return dumps({"message": f"No queued jobs at this time.", "success": False})
-
-
-@app.route("/queue")
-def q():
-    with open("queue.yaml", "r") as queue:
-        arr = full_load(queue)
-    return str(arr)
