@@ -32,6 +32,7 @@ async def task_loop():
     global ticks
     ticks += 1
     image_channels = ["images-discussion", "images"]
+    dream_channels = ["day-dreams"]
     botspam_channels = ["botspam"]
     with get_database() as client:
 
@@ -81,7 +82,13 @@ async def task_loop():
             logger.info("No completed jobs.")
         else:
             completedJob = queueCollection.find_one(query)
-            for channel in image_channels:
+            logger.info(f"Found completed job: Mode: {completedJob.get('mode')}")
+            if completedJob.get("mode") != "dream":
+                channels = image_channels
+            else:
+                channels = dream_channels
+            
+            for channel in channels:
                 channel = discord.utils.get(bot.get_all_channels(), name=channel)
                 embed, file, view = retrieve(completedJob.get('uuid'))
                 await channel.send(embed=embed, view=view, file=file)
@@ -216,7 +223,7 @@ def retrieve(uuid):
             description=f"Completed render <@{completedJob.get('author')}>\n`{completedJob.get('uuid')}`",
             color=discord.Colour.blurple(),
             fields= [
-                discord.EmbedField("Text Prompt", completedJob.get("text_prompt"), inline=True),
+                discord.EmbedField("Text Prompt", completedJob.get("text_prompt"), inline=False),
                 discord.EmbedField("Steps", completedJob.get("steps"), inline=True),
                 discord.EmbedField("Model", completedJob.get("model"), inline=True),
                 discord.EmbedField("Shape", completedJob.get("shape"), inline=True),
@@ -386,6 +393,7 @@ async def render(
             text_prompt = text_prompt.replace(':','')
             record = {
                 "uuid": job_uuid, 
+                "mode": "userwork",
                 "text_prompt": text_prompt, 
                 "steps": steps, 
                 "shape": shape, 
@@ -471,6 +479,8 @@ async def repeat(ctx, job_uuid):
         result["uuid"] = new_uuid
         result["status"] = 'queued'
         result["author"] = int(ctx.author.id)
+        result["progress"] = 0
+        result["mode"] = 'repeat'
         result = client.database.get_collection("queue").insert_one(result)
         insertID = result
         botspam_channels = ["botspam"]
@@ -571,6 +581,7 @@ async def queue(ctx):
                 summary = f"""
                 - 🧑‍🦲 Author: <@{job.get('author')}>
                 - ✍️ Text Prompt: `{job.get('text_prompt')}`
+                - Mode: `{job.get('mode')}`
                 - Status: `{job.get('status')}`
                 - Progress: `{job.get('percent')}%`
                 - Timestamp: `{job.get('timestamp')}`
@@ -594,7 +605,12 @@ async def agents(ctx):
         agents = client.database.get_collection("agents").find()
 
         for a, agent in enumerate(agents):
-            embed.add_field(name=agent.get("agent_id"), value=f"- Last Seen: `{agent.get('last_seen')}`\n- Score: `{agent.get('score')}`", inline=False)
+            embed.add_field(name=agent.get("agent_id"), value=f"""
+            - Last Seen: `{agent.get('last_seen')}`
+            - Score: `{agent.get('score')}`
+            - Idle Time: `{agent.get('idle_time')} sec`
+            - Mode: `{agent.get('mode')}`
+            """, inline=False)
         await ctx.respond(embed=embed)
 
 

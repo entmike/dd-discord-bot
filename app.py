@@ -114,7 +114,7 @@ def progress(agent_id, job_uuid):
             "percent" : request.form.get('percent')
         }
         event(e)
-        logger.info(e)
+        # logger.info(e)
 
         with get_database() as client:
             queueCollection = client.database.get_collection("queue")
@@ -202,31 +202,119 @@ def hello_world():
     return "<p>Hello, World!</p>"
 
 
-@app.route("/takeorder/<agent_id>")
-def takeorder(agent_id):
+@app.route("/takeorder/<agent_id>/<idle_time>")
+def takeorder(agent_id, idle_time):
     pulse(agent_id=agent_id)
+    mode = "awake"
+    if int(idle_time) > 30:
+        mode = "dreaming"
+    else:
+        mode = "awake"
+    with get_database() as client:
+            agentCollection = client.database.get_collection("agents")
+            agentCollection.update_one({"agent_id": agent_id}, {"$set": {"mode": mode}})
+            logger.info(f"{agent_id} is {mode}...")
+    with get_database() as client:
+        agentCollection = client.database.get_collection("agents")
+        agentCollection.update_one({"agent_id": agent_id}, {"$set": {"idle_time": int(idle_time)}})
+    logger.info(f"{agent_id} looking for work, idle time {idle_time} seconds...")
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
         query = {"status": "processing", "agent_id": agent_id}
         jobCount = queueCollection.count_documents(query)
         if jobCount > 0:
-            jobs = queueCollection.find_one(query)
+            # Update status
+            agentCollection = client.database.get_collection("agents")
+            agentCollection.update_one({"agent_id": agent_id}, {"$set": {"mode": "working", "idle_time": 0}})
+            jobs = queueCollection.find_one(query)           
+            logger.info("working")
             return dumps({"message ": f"You already have a job.  (Job '{jobs.get('uuid')}')", 
-            "uuid": jobs.get("uuid"), 
-            "details":json.loads(dumps(jobs)),
-            "success": True
+                "uuid": jobs.get("uuid"), 
+                "details":json.loads(dumps(jobs)),
+                "success": True
             })
         else:
             query = {"status": "queued"}
             queueCount = queueCollection.count_documents(query)
             if queueCount > 0:
+                # Work found
                 job = queueCollection.find_one({"$query": query, "$orderby": {"timestamp": 1}})
                 results = queueCollection.update_one({"uuid": job.get("uuid")}, {"$set": {"status": "processing", "agent_id": agent_id}})
                 count = results.modified_count
                 if count > 0:
                     log(f"Good news, <@{job.get('author')}>!  Your job `{job.get('uuid')}` is being processed now by `{agent_id}`...", title="💼 Job in Process")
+                    agentCollection = client.database.get_collection("agents")
+                    agentCollection.update_one({"agent_id": agent_id}, {"$set": {"mode": "working", "idle_time":0}})
                     return dumps({"message": f"Your current job is {job.get('uuid')}.", "uuid": job.get("uuid"), "details":json.loads(dumps(job)), "success": True})
-                else:
-                    return dumps({"message": f"Could not secure a job.", "success": False})
+            else:
+                # Dream
+                logger.info("No user jobs in queue...")
+                if mode == "awake":
+                    return dumps({"message": f"Could not secure a user job.", "success": False})
+                if mode == "dreaming":
+                    logger.info("Dream Job incoming.")
+                    d = dream(agent_id)
+                    return dumps(d)
 
     return dumps({"message": f"No queued jobs at this time.", "success": False})
+
+def dream(agent_id):
+    import dd_prompt_salad
+    job_uuid = uuid.uuid4()
+    templates = [
+        "a highly detailed {adjectives} nebula with majestic planets of {of_something}, art by {progrock/artist}, trending on artstation",
+        "a {progrock/adjective} {things}, {progrock/style}",
+        "{progrock/adjective} ophanim, tarot card, {progrock/style}",
+        "a {progrock/adjective} photo of a {locations} taken by {progrock/artist}, UHD, photorealistic",
+        "a verdant overgrown {locations}, {progrock/style}",
+        "{progrock/adjective} {colors} {shapes}s, vector art by {progrock/artist}",
+        "The {colors} of the {locations} is a representation of the Viking's obsession with the {locations}",
+        "The Korean girl is doing a {progrock/adjective} {progrock/style} painting in the digital age",
+        "The face of the {animals} is now etched in the {progrock/style} art of Japan",
+        "The Veiled Virgin Statue by {progrock/artist} covered in {progrock/adjective} cellophane centered in a {locations}",
+        "{progrock/adjective} {animals} crystal"
+    ]
+    import random
+    template = random.sample(templates,1)[0]
+    shape = random.sample([
+        "square", "pano", "landscape","portrait"
+    ],1)[0]
+    model = random.sample([
+        "default", "rn50x64", "vitl14","vitl14x336"
+    ],1)[0]
+    steps = random.sample([
+        150, 200, 250, 300, 400
+    ],1)[0]
+    cut_ic_pow = random.sample([
+        1, 5, 10, 20, 50, 100
+    ],1)[0]
+    clip_guidance_scale = random.sample([
+        5000, 7500, 10000, 15000, 20000
+    ],1)[0]
+    with get_database() as client:
+        job_uuid = str(job_uuid)
+        salad = dd_prompt_salad.make_random_prompt(amount=1, prompt_salad_path="prompt_salad", template=template)[0]
+        text_prompt = salad
+        record = {
+            "uuid": job_uuid, 
+            "mode": "dream",    # important
+            "agent_id": agent_id,
+            "text_prompt": text_prompt, 
+            "steps": steps, 
+            "shape": shape, 
+            "model": model,
+            "clip_guidance_scale": clip_guidance_scale,
+            "clamp_max" : 0.05,
+            "cut_ic_pow": cut_ic_pow,
+            "author": 398901736649261056,
+            "status": "processing",
+            "timestamp": datetime.utcnow()}
+        queueCollection = client.database.get_collection("queue")
+        queueCollection.insert_one(record)
+
+    dream_job = {"message ": f"You are dreaming.  (Job '{job_uuid}')", 
+        "uuid": job_uuid, 
+        "details":json.loads(dumps(record)),
+        "success": True
+    }
+    return dream_job
