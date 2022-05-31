@@ -1,5 +1,6 @@
 import datetime
 from random import choices
+import math
 import discord, os, subprocess
 from discord.ext import tasks
 from discord.ui import InputText, Modal
@@ -34,10 +35,11 @@ async def task_loop():
     image_channels = ["images-discussion", "images"]
     dream_channels = ["day-dreams"]
     botspam_channels = ["botspam"]
+    logger.info("loop")
     with get_database() as client:
 
         # Process any Events
-
+        logger.info("checking events")
         eventCollection = client.database.get_collection("events")
         events = eventCollection.find({"$query": {"ack": {"$ne": True}}})
         for event in events:
@@ -47,21 +49,42 @@ async def task_loop():
                 description=event.get("event"),
                 color=discord.Colour.blurple(),
             )
-            for channel in botspam_channels:
-                channel = discord.utils.get(bot.get_all_channels(), name=channel)
+            # for channel in botspam_channels:
+            #     channel = discord.utils.get(bot.get_all_channels(), name=channel)
                 # await channel.send(embed=embed)
+            event_type = event.get("event")["type"]
+            if event_type == "progress":
+                job_uuid = event.get("event")["job_uuid"]
+                # logger.info(f"Progress Update found for {job_uuid}")
+                jobCollection = client.database.get_collection("queue")
+                job = jobCollection.find_one({"$query": {"uuid": job_uuid}})
+                if job.get("progress_msg"):
+                    channel = discord.utils.get(bot.get_all_channels(), name="images")
+                    logger.info(f"Updating message {job.get('progress_msg')}...")
+                    try:
+                        message = await channel.fetch_message(job.get("progress_msg"))
+                        embed = discord.Embed(
+                            title="Request in Progress",
+                            description=f"🎨 <@{job.get('author')}> Your request is in progress.\nJob: `{job_uuid}`\nPercent complete: `{job.get('percent')}`",
+                            color=discord.Colour.green(),
+                        )
+                        await message.edit(embed = embed)
+                    except:
+                        logger.error(f"Could not update message {job.get('progress_msg')}")
+                else:
+                    logger.info(f"Progress update received but no message to update {job_uuid}")
             
             eventCollection.update_one({"uuid": event.get("uuid")}, {"$set": {"ack": True}})
-
         
         # Display any new messages
-
+        logger.info("checking messages")
         messageCollection = client.database.get_collection("logs")
         messages = messageCollection.find({"$query": {"ack": {"$ne": True}}})
         for message in messages:
             title = "Message"
             if message.get("title"):
                 title = message.get(title)
+            print(title)
             embed = discord.Embed(
                 title=title,
                 description=message.get("message"),
@@ -69,12 +92,13 @@ async def task_loop():
             )
             for channel in botspam_channels:
                 channel = discord.utils.get(bot.get_all_channels(), name=channel)
-                await channel.send(embed=embed)
-                
+                msg = await channel.send(embed=embed)
+
             messageCollection.update_one({"uuid": message.get("uuid")}, {"$set": {"ack": True}})
         
         # Display any completed jobs
         
+        logger.info("checking completed jobs")
         query = {"status": "complete"}
         queueCollection = client.database.get_collection("queue")
         completed = queueCollection.count_documents(query)
@@ -91,11 +115,23 @@ async def task_loop():
             for channel in channels:
                 channel = discord.utils.get(bot.get_all_channels(), name=channel)
                 embed, file, view = retrieve(completedJob.get('uuid'))
-                await channel.send(embed=embed, view=view, file=file)
+                try:
+                    if completedJob.get("progress_msg"):
+                        message = await channel.fetch_message(completedJob.get("progress_msg"))
+                        if message:
+                            await message.edit(view=view, file=file)
+                            await message.edit(embed=embed)
+                        else:
+                            await channel.send(embed=embed, view=view, file=file)
+                    else:
+                        await channel.send(embed=embed, view=view, file=file)
+                except Exception as e:
+                    await channel.send(f"💀 Cannot display {completedJob.get('uuid')}\n`{e}`")
             queueCollection.update_one({"uuid": completedJob.get("uuid")}, {"$set": {"status": "archived"}})
 
         # Display any failed jobs
         
+        logger.info("checking failed jobs")
         query = {"status": "failed"}
         queueCollection = client.database.get_collection("queue")
         completed = queueCollection.count_documents(query)
@@ -142,43 +178,6 @@ class MyModal(Modal):
                 style=discord.InputTextStyle.short,
             )
         )
-        # self.add_item(
-        #     discord.ui.Select(
-        #         placeholder="landscape",
-        #         custom_id="shape",
-        #         options = [
-        #             discord.SelectOption(
-        #                 label = "Landscape",
-        #                 value = "landscape"
-        #             ),discord.SelectOption(
-        #                 label = "Portrait",
-        #                 value = "portrait"
-        #             )
-        #         ]
-        #     )
-        # )
-        # self.add_item(
-        #     discord.ui.Select(
-        #         placeholder="model",
-        #         custom_id="model",
-        #         options = [
-        #             discord.SelectOption(
-        #                 label = "Default (ViTB16+32, RN50)",
-        #                 value = "default"
-        #             ),discord.SelectOption(
-        #                 label = "ViTL16+32, RN50x64",
-        #                 value = "rn50x64"
-        #             )
-        #         ]
-        #     )
-        # )
-   
-    # clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False, default=1500),
-    # cut_ic_pow: discord.Option(int, "CLIP Innercut Power", required=False, default=1),
-
-
-
-
 
     async def callback(self, interaction: discord.Interaction):
         embed = discord.Embed(title="Your Modal Results", color=discord.Color.random())
@@ -189,10 +188,14 @@ class MyModal(Modal):
 @bot.slash_command(name="display")
 async def display(ctx, job_uuid):
     embed, file, view = retrieve(job_uuid)
-    await ctx.respond(embed=embed, file=file, view=view)
+    try:
+        await ctx.respond(embed=embed, view=view, file=file)
+    except:
+        await ctx.respond(f"💀 Cannot display {job_uuid}")
+
 
 @bot.slash_command(name="logs")
-async def display(ctx, job_uuid):
+async def logs(ctx, job_uuid):
     embed, file, view = retrieve_log(job_uuid)
     if file:
         await ctx.respond(embed=embed, file=file, view=view)
@@ -228,13 +231,16 @@ def retrieve(uuid):
                 discord.EmbedField("Model", completedJob.get("model"), inline=True),
                 discord.EmbedField("Shape", completedJob.get("shape"), inline=True),
                 discord.EmbedField("Inner Cut Power", completedJob.get("cut_ic_pow"), inline=True),
+                discord.EmbedField("Saturation Scale", completedJob.get("sat_scale"), inline=True),
                 discord.EmbedField("CLIP Guidance Scale", completedJob.get("clip_guidance_scale"), inline=True),
-                discord.EmbedField("Clamp Max", str(completedJob.get("clamp_max")), inline=True)
+                discord.EmbedField("Clamp Max", str(completedJob.get("clamp_max")), inline=True),
+                discord.EmbedField("Seed", str(completedJob.get("set_seed")), inline=True),
+                discord.EmbedField("Duration (sec)", str(math.floor(completedJob.get("duration"))), inline=True)
             ]
         )
         embed.set_author(
             name="Fever Dream",
-            icon_url="https://cdn.howles.cloud/Butthead.png",
+            icon_url="https://cdn.howles.cloud/feverdream.png",
         )
 
     view = discord.ui.View()
@@ -249,10 +255,11 @@ def retrieve(uuid):
                 color=discord.Colour.blurple(),
                 fields= [
                     discord.EmbedField("Text Prompt", completedJob.get("text_prompt"), inline=True),
-                    discord.EmbedField("Model", completedJob.get("model"), inline=True),
-                    discord.EmbedField("Shape", completedJob.get("shape"), inline=True),
-                    discord.EmbedField("Inner Cut Power", completedJob.get("cut_ic_pow"), inline=True),
-                    discord.EmbedField("CLIP Guidance Scale", completedJob.get("clip_guidance_scale"), inline=True)
+                    # discord.EmbedField("Model", completedJob.get("model"), inline=True),
+                    # discord.EmbedField("Shape", completedJob.get("shape"), inline=True),
+                    # discord.EmbedField("Inner Cut Power", completedJob.get("cut_ic_pow"), inline=True),
+                    # discord.EmbedField("Saturation Scale", completedJob.get("sat_scale"), inline=True),
+                    # discord.EmbedField("CLIP Guidance Scale", completedJob.get("clip_guidance_scale"), inline=True)
                 ]
             )
             embed.set_author(
@@ -266,8 +273,11 @@ def retrieve(uuid):
     # hateButton.callback = hateCallback
     # view.add_item(detButton)
     # view.add_item(hateButton)
-    file = discord.File(f"images/{completedJob.get('filename')}", filename=completedJob.get("filename"))
+    fn =completedJob.get("filename")
+    logger.info(fn)
+    file = discord.File(f"images/{completedJob.get('filename')}", fn)
     embed.set_image(url=f"attachment://{completedJob.get('filename')}")
+    logger.info(file)
     return embed, file, view
 
 @bot.slash_command(name="modaltest")
@@ -282,7 +292,8 @@ async def help(ctx, term: discord.Option(str, "Term", required=False, default="h
         discord.OptionChoice("Steps", value="steps"),
         discord.OptionChoice("CLIP Guidance Scale", value="clip_guidance_scale"),
         discord.OptionChoice("Inner Cut Power", value="cut_ic_pow"),
-        discord.OptionChoice("Clamp Max", value="clamp_max")
+        discord.OptionChoice("Clamp Max", value="clamp_max"),
+        discord.OptionChoice("Seed", value="set_seed")
     ])):
     help = ""
     if(term == "clamp_max"):
@@ -329,47 +340,20 @@ async def on_ready():
 async def on_member_join(member):
     await member.send(f"Welcome to the server, {member.mention}! Enjoy your stay here.")
 
+async def placeholder(ctx, job_uuid):
+    logger.info(f"Placeholder called {job_uuid}")
+    channel = discord.utils.get(bot.get_all_channels(), name="images")
+    embed = discord.Embed(
+        title="Image Preview Test",
+        description=f"Placeholder for {ctx.author.mention} \nJob: `{job_uuid}`",
+        color=discord.Colour.blurple(),
+    )
+    msg = await channel.send(embed=embed)
+    
+    with get_database() as client:
+        client.database.get_collection("queue").update_one({"uuid": job_uuid}, {"$set": {"progress_msg": msg.id}})
 
-@bot.command()
-async def gtn(ctx):
-    """A Slash Command to play a Guess-the-Number game."""
-    play = True
-    while play:
-        await ctx.respond("Guess a number between 1 and 10.  -1 to give up.")
-        guess = await bot.wait_for("message", check=lambda message: message.author == ctx.author)
-
-        if int(guess.content) == -1:
-            await ctx.send("All good.  Maybe you'll win next time...")
-            play = False
-            return
-        if int(guess.content) == 5:
-            await ctx.send("You guessed it!")
-            play = False
-        else:
-            await ctx.send("Nope, try again.")
-
-
-@bot.command(description="Submit a Disco Diffusion Render Request")
-async def render(
-    ctx,
-    text_prompt: discord.Option(str, "Enter your text prompt", required=True, default = "A beautiful painting of a singular lighthouse, shining its light across a tumultuous sea of blood by greg rutkowski and thomas kinkade, Trending on artstation."),
-    steps: discord.Option(int, "Number of steps", required=False, default=150),
-    shape: discord.Option(str, "Image Shape", required=False, default="landscape", choices=[
-        discord.OptionChoice("Landscape", value="landscape"),
-        discord.OptionChoice("Portrait", value="portrait"),
-        discord.OptionChoice("Square", value="square"),
-        discord.OptionChoice("Panoramic", value="pano")
-    ]),
-    model: discord.Option(str, "Models", required=False, default="default", choices=[
-        discord.OptionChoice("Default (ViTL16+32, RN50)", value="default"),
-        discord.OptionChoice("ViTL16+32, RN50x64", value="rn50x64"),
-        discord.OptionChoice("ViTL16+32+14", value="vitl14"),
-        discord.OptionChoice("ViTL16+32+14x336", value="vitl14x336"),
-    ]),
-    clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False, default=5000),
-    cut_ic_pow: discord.Option(int, "CLIP Innercut Power", required=False, default=1),
-    clamp_max: discord.Option(str, "Clamp Max", required=False, default="0.05"),
-):
+async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed):
     reject = False
     reasons = []
     with get_database() as client:
@@ -390,22 +374,28 @@ async def render(
     if not reject:
         with get_database() as client:
             job_uuid = str(uuid.uuid4())
-            text_prompt = text_prompt.replace(':','')
+            text_prompt = text_prompt.replace("“", '"')
+            text_prompt = text_prompt.replace("”", '"')
             record = {
                 "uuid": job_uuid, 
                 "mode": "userwork",
+                "render_type": render_type,
                 "text_prompt": text_prompt, 
                 "steps": steps, 
                 "shape": shape, 
                 "model": model,
                 "clip_guidance_scale": clip_guidance_scale,
                 "clamp_max" : clamp_max,
+                "set_seed" : set_seed,
                 "cut_ic_pow": cut_ic_pow,
+                "sat_scale": sat_scale,
                 "author": int(ctx.author.id),
                 "status": "queued",
                 "timestamp": datetime.datetime.utcnow()}
             queueCollection = client.database.get_collection("queue")
             queueCollection.insert_one(record)
+            await placeholder(ctx, job_uuid)
+
             botspam_channels = ["botspam"]
             for channel in botspam_channels:
                 channel = discord.utils.get(bot.get_all_channels(), name=channel)
@@ -414,11 +404,55 @@ async def render(
                     description=f"📃 <@{ctx.author.id}> Your request has been queued up.\nJob: `{job_uuid}`",
                     color=discord.Colour.blurple(),
                 )
-                await channel.send(embed=embed)
+                msg = await channel.send(embed=embed)
                 await ctx.respond("Command Accepted.",delete_after=3)
 
     else:
         await ctx.respond("\n".join(reasons))
+
+
+@bot.command(description="Submit a Disco Diffusion Render Request")
+async def render(
+    ctx,
+    text_prompt: discord.Option(str, "Enter your text prompt", required=True, default = "A beautiful painting of a singular lighthouse, shining its light across a tumultuous sea of blood by greg rutkowski and thomas kinkade, Trending on artstation."),
+    steps: discord.Option(int, "Number of steps", required=False, default=150),
+    shape: discord.Option(str, "Image Shape", required=False, default="landscape", choices=[
+        discord.OptionChoice("Landscape", value="landscape"),
+        discord.OptionChoice("Portrait", value="portrait"),
+        discord.OptionChoice("Square", value="square"),
+        discord.OptionChoice("Panoramic", value="pano")
+    ]),
+    model: discord.Option(str, "Models", required=False, default="default", choices=[
+        discord.OptionChoice("Default (ViTB16+32, RN50)", value="default"),
+        discord.OptionChoice("ViTB16+32, RN50x64", value="rn50x64"),
+        discord.OptionChoice("ViTB16+32, ViTL14", value="vitl14"),
+        discord.OptionChoice("ViTB16+32, ViTL14x336", value="vitl14x336"),
+    ]),
+    clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False, default=5000),
+    cut_ic_pow: discord.Option(int, "CLIP Innercut Power", required=False, default=1),
+    sat_scale: discord.Option(int, "Saturation Scale", required=False, default=0),
+    clamp_max: discord.Option(str, "Clamp Max", required=False, default="0.05"),
+    set_seed: discord.Option(int, "Seed", required=False, default=-1),
+):
+    await do_render(ctx, "render", text_prompt, steps, shape, model, clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed)
+
+@bot.command(description="Submit a Disco Diffusion Sketch Request (will jump queue)")
+async def sketch(
+    ctx,
+    text_prompt: discord.Option(str, "Enter your text prompt", required=True, default = "A beautiful painting of a singular lighthouse, shining its light across a tumultuous sea of blood by greg rutkowski and thomas kinkade, Trending on artstation."),
+    shape: discord.Option(str, "Image Shape", required=False, default="landscape", choices=[
+        discord.OptionChoice("Landscape", value="landscape"),
+        discord.OptionChoice("Portrait", value="portrait"),
+        discord.OptionChoice("Square", value="square"),
+        discord.OptionChoice("Panoramic", value="pano")
+    ]),
+    clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False, default=5000),
+    cut_ic_pow: discord.Option(int, "CLIP Innercut Power", required=False, default=1),
+    sat_scale: discord.Option(int, "Saturation Scale", required=False, default=0),
+    clamp_max: discord.Option(str, "Clamp Max", required=False, default="0.05"),
+    set_seed: discord.Option(int, "Seed", required=False, default=-1),
+):
+    await do_render(ctx, "sketch", text_prompt, 50, shape, "default", clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed)
 
 @bot.command(description="Nuke Render Queue (debug)")
 async def nuke(ctx):
@@ -478,6 +512,7 @@ async def repeat(ctx, job_uuid):
         new_uuid = str(uuid.uuid4())
         result["uuid"] = new_uuid
         result["status"] = 'queued'
+        result["timestamp"] = datetime.datetime.utcnow()
         result["author"] = int(ctx.author.id)
         result["progress"] = 0
         result["mode"] = 'repeat'
@@ -495,15 +530,8 @@ async def repeat(ctx, job_uuid):
                 await channel.send(embed=embed)
                 await ctx.respond("Command Accepted.",delete_after=3)
         else:
-            for channel in botspam_channels:
-                channel = discord.utils.get(bot.get_all_channels(), name=channel)
-                embed = discord.Embed(
-                    title="Job Repeated",
-                    description=f"💼 <@{ctx.author.id}> Job `{job_uuid}` marked for a repeat run.  New uuid: `{new_uuid}`",
-                    color=discord.Colour.blurple(),
-                )
-                await channel.send(embed=embed)
-                await ctx.respond("Command Accepted.",delete_after=3)
+            await placeholder(ctx, new_uuid)
+            await ctx.respond("Command Accepted.",delete_after=3)
 
 @bot.command(description="Get details of a render request")
 async def query(ctx, uuid):
@@ -563,18 +591,38 @@ async def rejects(ctx):
         await ctx.respond("Command Accepted.",delete_after=3)
 
 
-@bot.command(description="View next 5 render queue entries")
+@bot.command(description="View next 10 render queue entries")
 async def queue(ctx):
+    await query_queue(ctx, who = "all", status = "all")
+
+@bot.command(description="View active queue entries")
+async def active(ctx):
+    await query_queue(ctx, who = "all", status = "processing")
+
+async def query_queue(ctx, who, status):
     with get_database() as client:
-        queue = client.database.get_collection("queue").find({"$query": {"status": {"$nin": ["archived","rejected"]}}, "$orderby": {"timestamp": -1}}).limit(5)
+        q = {"status": {"$nin": ["archived","rejected"]}}
+        if who == "me":
+            q ["author"] = int(ctx.author.id)
+        if status != "all":
+            q["status"] = status
+        if status == "all" and who=="me":
+            del q["status"]
+
+        query = {"$query": q, "$orderby": {"timestamp": -1}}
+        queue = client.database.get_collection("queue").find(query).limit(10)
         botspam_channels = ["botspam"]
         for channel in botspam_channels:
             channel = discord.utils.get(bot.get_all_channels(), name=channel)
             # https://docs.pycord.dev/en/master/api.html?highlight=embed#discord.Embed
+            color = discord.Colour.blurple()
+            if status == "processing":
+                color = discord.Colour.green()
+
             embed = discord.Embed(
                 title="Request Queue",
                 description="The following requests are queued up.",
-                color=discord.Colour.blurple(),  # Pycord provides a class with default colors you can choose from
+                color=color,  # Pycord provides a class with default colors you can choose from
             )
             for j, job in enumerate(queue):
                 user = await bot.fetch_user(job.get("author"))
@@ -591,6 +639,9 @@ async def queue(ctx):
             await channel.send(embed=embed)
         await ctx.respond("Command Accepted.",delete_after=3)
 
+@bot.command(description="View your history")
+async def myhistory(ctx):
+    await query_queue(ctx, who = "me", status = "all")
 
 @bot.command()
 async def agents(ctx):

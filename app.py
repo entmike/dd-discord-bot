@@ -201,6 +201,25 @@ def upload_file(agent_id, job_uuid):
 def hello_world():
     return "<p>Hello, World!</p>"
 
+@app.route("/clearlogs")
+def clearlogs():
+    with get_database() as client:
+            logCollection = client.database.get_collection("logs")
+            logCollection.drop()
+    return "dropped logs"
+
+@app.route("/retryall")
+def retryall():
+    with get_database() as client:
+        result = client.database.get_collection("queue").update_many({"status": "rejected"}, {"$set": {"status": "queued"}})
+    return "retrying all"
+
+@app.route("/clearevents")
+def clearevents():
+    with get_database() as client:
+            logCollection = client.database.get_collection("events")
+            logCollection.drop()
+    return "dropped events"
 
 @app.route("/takeorder/<agent_id>/<idle_time>")
 def takeorder(agent_id, idle_time):
@@ -234,8 +253,13 @@ def takeorder(agent_id, idle_time):
                 "success": True
             })
         else:
-            query = {"status": "queued"}
-            queueCount = queueCollection.count_documents(query)
+            # Check for sketches first
+            query = {"status": "queued", "render_type": "sketch"}
+            queueCount = queueCollection.count_documents(query)           
+            if queueCount == 0:
+                query = {"status": "queued", "render_type": None}
+                queueCount = queueCollection.count_documents(query)
+
             if queueCount > 0:
                 # Work found
                 job = queueCollection.find_one({"$query": query, "$orderby": {"timestamp": 1}})
@@ -263,16 +287,22 @@ def dream(agent_id):
     job_uuid = uuid.uuid4()
     templates = [
         "a highly detailed {adjectives} nebula with majestic planets of {of_something}, art by {progrock/artist}, trending on artstation",
-        "a {progrock/adjective} {things}, {progrock/style}",
-        "{progrock/adjective} ophanim, tarot card, {progrock/style}",
-        "a {progrock/adjective} photo of a {locations} taken by {progrock/artist}, UHD, photorealistic",
+        "a beautiful watercolor painting of a {adjectives} {animals} in {locations}, art by {artists}, trending on artstation",
+        "an ominous sculpture of {animals}s in the shape of {shapes} made of {of_something}, digital painting",
+        "a horrible {adjectives} {adjectives} fuzzy {locations} soaked in {things}, art by {artists}",
+        "a colorful galactic {locations} colored {colors}, art by {artists}",
+        "a {things} sinking in a {locations} covered in {things}s, watercolor, trending on artstation",
+        "an immaculately detailed gothic painting of a {things} surrounded by majestic {things}, art by {artists}, {styles} style",
+        # "{progrock/adjective} ophanim, tarot card, {progrock/style}",
+        # "a {progrock/adjective} photo of a {locations} taken by {progrock/artist}, UHD, photorealistic",
         "a verdant overgrown {locations}, {progrock/style}",
         "{progrock/adjective} {colors} {shapes}s, vector art by {progrock/artist}",
-        "The {colors} of the {locations} is a representation of the Viking's obsession with the {locations}",
-        "The Korean girl is doing a {progrock/adjective} {progrock/style} painting in the digital age",
-        "The face of the {animals} is now etched in the {progrock/style} art of Japan",
-        "The Veiled Virgin Statue by {progrock/artist} covered in {progrock/adjective} cellophane centered in a {locations}",
-        "{progrock/adjective} {animals} crystal"
+        "A beautiful landscape on an alien planet with giant {things}s, and {adjectives} vegetation Giant {colors} and {things} in the {locations} by {artists}, greg rutkowski, {artists}, {artists}, {artists} Trending on artstation and SF ART"
+        # "The {colors} of the {locations} is a representation of the Viking's obsession with the {locations}",
+        # "The Korean girl is doing a {progrock/adjective} {progrock/style} painting in the digital age",
+        # "The face of the {animals} is now etched in the {progrock/style} art of Japan",
+        # "The Veiled Virgin Statue by {progrock/artist} covered in {progrock/adjective} cellophane centered in a {locations}",
+        # "{progrock/adjective} {animals} crystal"
     ]
     import random
     template = random.sample(templates,1)[0]
@@ -291,6 +321,9 @@ def dream(agent_id):
     clip_guidance_scale = random.sample([
         5000, 7500, 10000, 15000, 20000
     ],1)[0]
+    sat_scale = random.sample([
+        0, 100, 500, 1000, 5000, 10000, 20000
+    ],1)[0]
     with get_database() as client:
         job_uuid = str(job_uuid)
         salad = dd_prompt_salad.make_random_prompt(amount=1, prompt_salad_path="prompt_salad", template=template)[0]
@@ -306,7 +339,8 @@ def dream(agent_id):
             "clip_guidance_scale": clip_guidance_scale,
             "clamp_max" : 0.05,
             "cut_ic_pow": cut_ic_pow,
-            "author": 398901736649261056,
+            "sat_scale": sat_scale,
+            "author": 977198605221912616,
             "status": "processing",
             "timestamp": datetime.utcnow()}
         queueCollection = client.database.get_collection("queue")
