@@ -38,7 +38,7 @@ def event(event):
     with get_database() as client:
         eventTable = client.database.get_collection("events")
         eventTable.insert_one({"timestamp": datetime.now(), "ack": False, "uuid": str(uuid.uuid4()), "event" : event})
-    logger.info(f"Event logged: {event}")
+    # logger.info(f"Event logged: {event}")
 
 # @app.route("/job/<job_uuid>")
 # def job(job_uuid):
@@ -129,6 +129,36 @@ def progress(agent_id, job_uuid):
         
     if request.method == "GET":
         return "OK"
+
+@app.route("/preview/<agent_id>/<job_uuid>", methods=["GET", "POST"])
+def preview_file(agent_id, job_uuid):
+    pulse(agent_id=agent_id)
+    if request.method == "POST":
+        file = request.files["file"]
+        if file.filename == "":
+            flash("No file uploaded.")
+            return redirect(request.url)
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            file.save(os.path.join(app.config["UPLOAD_FOLDER"], f"{job_uuid}_{filename}"))
+            logger.info(f"{job_uuid}_{filename} saved.")
+            e = {
+                "type" : "preview",
+                "agent" : agent_id,
+                "job_uuid" : job_uuid
+            }
+            event(e)
+            with get_database() as client:
+                queueCollection = client.database.get_collection("queue")
+                results = queueCollection.update_one({
+                    "agent_id": agent_id, 
+                    "uuid": job_uuid}, {"$set": {"preview": True}})
+            return f"{job_uuid}_filename"
+        else:
+            return "Bad file."
+
+
+
 
 @app.route("/upload/<agent_id>/<job_uuid>", methods=["GET", "POST"])
 def upload_file(agent_id, job_uuid):
@@ -255,10 +285,12 @@ def takeorder(agent_id, idle_time):
         else:
             # Check for sketches first
             query = {"status": "queued", "render_type": "sketch"}
-            queueCount = queueCollection.count_documents(query)           
+            queueCount = queueCollection.count_documents(query)
+            logger.info(f"{queueCount} sketches in queue.")
             if queueCount == 0:
-                query = {"status": "queued", "render_type": None}
+                query = {"status": "queued"}
                 queueCount = queueCollection.count_documents(query)
+                logger.info(f"{queueCount} renders in queue.")
 
             if queueCount > 0:
                 # Work found
@@ -286,6 +318,9 @@ def dream(agent_id):
     import dd_prompt_salad
     job_uuid = uuid.uuid4()
     templates = [
+        "Random starlight {things} flying in {location} {colors}, by {artists}",
+        "a horrific decaying {locations} drenched in gory {colors}, art by {artists}",
+        "an ominous figure standing in a small room surrounded by {things}s, surveillance footage",
         "a highly detailed {adjectives} nebula with majestic planets of {of_something}, art by {progrock/artist}, trending on artstation",
         "a beautiful watercolor painting of a {adjectives} {animals} in {locations}, art by {artists}, trending on artstation",
         "an ominous sculpture of {animals}s in the shape of {shapes} made of {of_something}, digital painting",
@@ -340,6 +375,7 @@ def dream(agent_id):
             "clamp_max" : 0.05,
             "cut_ic_pow": cut_ic_pow,
             "sat_scale": sat_scale,
+            "set_seed" : -1,
             "author": 977198605221912616,
             "status": "processing",
             "timestamp": datetime.utcnow()}
