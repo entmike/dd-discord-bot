@@ -17,7 +17,7 @@ from bson.json_util import dumps
 import warnings
 import json
 from loguru import logger
-
+from texttable import Texttable
 from db import get_database
 
 warnings.filterwarnings("ignore")
@@ -28,7 +28,9 @@ load_dotenv()
 agents = ["mike"]
 ticks = 0
 
-async def queueBroadcast(who, status, author=None, channel = None, messageid=None):
+async def queueBroadcast(who, status, author=None, channel = None, messageid=None, label="queue"):
+    channel_id = 979027153029070918
+    channel = bot.get_channel(channel)
     with get_database() as client:
         q = {"status": {"$nin": ["archived","rejected"]}}
         if who == "me":
@@ -39,8 +41,12 @@ async def queueBroadcast(who, status, author=None, channel = None, messageid=Non
             del q["status"]
 
         query = {"$query": q, "$orderby": {"timestamp": -1}}
+        count = client.database.get_collection("queue").count_documents(q)
+        name = f"{label}︱{count}"
+        logger.info(f"Renaming Channel to {name}")
+        # await channel.edit(name = name)
+        logger.info("Channel Renamed")
         queue = client.database.get_collection("queue").find(query).limit(10)
-        channel = discord.utils.get(bot.get_all_channels(), name=channel)
         color = discord.Colour.blurple()
         if status == "processing":
             color = discord.Colour.green()
@@ -54,14 +60,19 @@ async def queueBroadcast(who, status, author=None, channel = None, messageid=Non
             user = await bot.fetch_user(job.get("author"))
             summary = f"""
             - 🧑‍🦲 Author: <@{job.get('author')}>
-            - ✍️ Text Prompt: `{job.get('text_prompt')}`
+            - ✍️ Text Prompt: `{job.get('text_prompt')[0:100]}...`
             - Mode: `{job.get('mode')}`
             - Status: `{job.get('status')}`
             - Progress: `{job.get('percent')}%`
             - Timestamp: `{job.get('timestamp')}`
             - Agent: `{job.get('agent_id')}`
             """
-            embed.add_field(name=job.get("uuid"), value=summary, inline=False)
+            msgid = job.get("progress_msg")
+            if msgid:
+                link = f"[{job.get('uuid')}](https://discord.com/channels/945459234194219029/{channel_id}/{msgid}) (<@{job.get('author')}>)\nProgress: `{job.get('percent')}%`"
+                embed.add_field(name=f"🎨 {job.get('uuid')}", value=link, inline=False)
+            else:
+                embed.add_field(name=f"🎨 {job.get('uuid')}", value=f"{job.get('uuid')} (<@{job.get('author')}>)\nProgress: `{job.get('percent')}%`", inline=False)
         if messageid != None:
             message = await channel.fetch_message(messageid)
             await message.edit(embed = embed)
@@ -79,9 +90,15 @@ async def task_loop():
     botspam_channels = ["botspam"]
     logger.info("loop")
     with get_database() as client:
+        # Agents
+        logger.info("Updating Agent Status")
+        await agent_status(981934300201103371, 981935410714378310)
+        # Active
         logger.info("Updating Active Queue")
-        await queueBroadcast("all", "processing", None, "active-jobs", 981572405468209162)
-        await queueBroadcast("all", "queued", None, "waiting-jobs", 981582971477848084)
+        await queueBroadcast("all", "processing", None, 981250881167196280, 981572405468209162,"active")
+        # Waiting
+        logger.info("Updating Waiting Queue")
+        await queueBroadcast("all", "queued", None, 981250961534255186, 981582971477848084, "waiting")
         # Process any Events
         logger.info("checking events")
         eventCollection = client.database.get_collection("events")
@@ -141,7 +158,7 @@ async def task_loop():
                             # logger.info(f"Progress update received but no message to update {job_uuid}")
             
                 d = eventCollection.delete_one({"uuid": event.get("uuid")})
-                logger.info(f"Deleted {d.deleted_count} processed event(s).")
+                # logger.info(f"Deleted {d.deleted_count} processed event(s).")
             # eventCollection.update_one({"uuid": event.get("uuid")}, {"$set": {"ack": True}})
         
         # Display any new messages
@@ -173,44 +190,45 @@ async def task_loop():
         if completed == 0:
             logger.info("No completed jobs.")
         else:
-            completedJob = queueCollection.find_one(query)
-            logger.info(f"Found completed job: Mode: {completedJob.get('mode')}")
-            
-            render_type = completedJob.get('render_type')
-            if render_type is None:
-                render_type = "render"
+            completedJobs = queueCollection.find(query)
+            for completedJob in completedJobs:
+                logger.info(f"Found completed job: Mode: {completedJob.get('mode')}")
+                
+                render_type = completedJob.get('render_type')
+                if render_type is None:
+                    render_type = "render"
 
-            if render_type == "sketch":
-                channel = "sketches"
-            if render_type == "render":
-                channel = "images"
+                if render_type == "sketch":
+                    channel = "sketches"
+                if render_type == "render":
+                    channel = "images"
 
-            if completedJob.get("mode") != "dream":
-                channels = ["images-discussion", channel]
-            else:
-                channels = dream_channels
-            
+                if completedJob.get("mode") != "dream":
+                    channels = ["images-discussion", channel]
+                else:
+                    channels = dream_channels
+                
 
-            for channel in channels:
-                channel = discord.utils.get(bot.get_all_channels(), name=channel)
-                embed, file, view = retrieve(completedJob.get('uuid'))
-                try:
-                    if completedJob.get("progress_msg"):
-                        try:
-                            message = await channel.fetch_message(completedJob.get("progress_msg"))
-                        except:
-                            message = None
-                        if message:
-                            await message.edit(view=view, file=file)
-                            await message.edit(embed=embed)
+                for channel in channels:
+                    channel = discord.utils.get(bot.get_all_channels(), name=channel)
+                    embed, file, view = retrieve(completedJob.get('uuid'))
+                    try:
+                        if completedJob.get("progress_msg"):
+                            try:
+                                message = await channel.fetch_message(completedJob.get("progress_msg"))
+                            except:
+                                message = None
+                            if message:
+                                await message.edit(view=view, file=file)
+                                await message.edit(embed=embed)
+                            else:
+                                await channel.send(embed=embed, view=view, file=file)
                         else:
                             await channel.send(embed=embed, view=view, file=file)
-                    else:
-                        await channel.send(embed=embed, view=view, file=file)
-                except Exception as e:
-                    tb = traceback.format_exc()
-                    await channel.send(f"💀 Cannot display {completedJob.get('uuid')}\n`{tb}`")
-            queueCollection.update_one({"uuid": completedJob.get("uuid")}, {"$set": {"status": "archived"}})
+                    except Exception as e:
+                        tb = traceback.format_exc()
+                        await channel.send(f"💀 Cannot display {completedJob.get('uuid')}\n`{tb}`")
+                queueCollection.update_one({"uuid": completedJob.get("uuid")}, {"$set": {"status": "archived"}})
 
         # Display any failed jobs
         
@@ -229,6 +247,11 @@ async def task_loop():
                     description=f"Job `{completedJob.get('uuid')}` failed, <@{completedJob.get('author')}>!  Blame `{completedJob.get('agent_id')}`",
                     color=discord.Colour.blurple(),
                 )
+                embed.add_field(name="Traceback", value=f"```{completedJob.get('traceback')}```", inline=False)
+                log = completedJob.get('log')
+                if log:
+                    log = log[-300:]
+                embed.add_field(name="Log", value=f"```{log}```", inline=False)
                 # embed, file, view = retrieve(completedJob.get('uuid'))
                 await channel.send(embed=embed)
             queueCollection.update_one({"uuid": completedJob.get("uuid")}, {"$set": {"status": "rejected"}})
@@ -335,11 +358,13 @@ def retrieve(uuid):
             fields= [
                 discord.EmbedField("Text Prompt", f"`{completedJob.get('text_prompt')}`", inline=False),
                 discord.EmbedField("Steps", f"`{completedJob.get('steps')}`", inline=True),
-                discord.EmbedField("Model", f"`{completedJob.get('model')}`", inline=True),
+                discord.EmbedField("CLIP Model", f"`{completedJob.get('model')}`", inline=True),
+                discord.EmbedField("Diffusion Model", f"`{completedJob.get('diffusion_model')}`", inline=True),
                 discord.EmbedField("Shape", f"`{completedJob.get('shape')}`", inline=True),
                 discord.EmbedField("Inner Cut Power", f"`{completedJob.get('cut_ic_pow')}`", inline=True),
                 discord.EmbedField("Saturation Scale", f"`{completedJob.get('sat_scale')}`", inline=True),
                 discord.EmbedField("CLIP Guidance Scale", f"`{completedJob.get('clip_guidance_scale')}`", inline=True),
+                discord.EmbedField("Cut Schedule", f"`{completedJob.get('cut_schedule')}`", inline=True),
                 discord.EmbedField("Clamp Max", f"`{str(completedJob.get('clamp_max'))}`", inline=True),
                 discord.EmbedField("Seed", f"`{str(completedJob.get('set_seed'))}`", inline=True),
                 discord.EmbedField("Symmetry", f"`{str(completedJob.get('symmetry'))}`", inline=True),
@@ -409,10 +434,36 @@ async def help(ctx, term: discord.Option(str, "Term", required=False, default="h
         discord.OptionChoice("Steps", value="steps"),
         discord.OptionChoice("CLIP Guidance Scale", value="clip_guidance_scale"),
         discord.OptionChoice("Inner Cut Power", value="cut_ic_pow"),
+        discord.OptionChoice("Cut Schedule", value="cut_schedule"),
         discord.OptionChoice("Clamp Max", value="clamp_max"),
         discord.OptionChoice("Seed", value="set_seed")
     ])):
     help = ""
+    if(term == "cut_schedule"):
+        help = """
+        **`cut_schedule` controls 2 DD parameters:**
+        
+        `cut_overview`: The schedule of overview cuts
+        `cut_innercut`: The schedule of inner cuts
+
+        **Values:**
+
+        **`default`**:
+        `cut_overview` : `"[12]*400+[4]*600"`
+        `cut_innercut` : `"[4]*400+[12]*600"`
+
+        **'detailed-a'**
+        `cut_overview` : `"[10]*200+[8]*200+[6]*200+[2]*200+[2]*200"`
+        `cut_innercut` : `"[0]*200+[2]*200+[6]*200+[8]*200+[10]*200"`
+
+        **`detailed-b`**
+        `cut_overview` : `"[10]*200+[8]*200+[6]*200+[4]*200+[2]*200"`
+        `cut_innercut` : `"[2]*200+[2]*200+[8]*200+[8]*200+[10]*200"`
+
+        **`ram_efficient`**
+        `cut_overview` : `"[10]*200+[8]*200+[5]*200+[2]*200+[2]*200"`
+        `cut_innercut` : `"[0]*200+[2]*200+[5]*200+[7]*200+[9]*200"`
+        """
     if(term == "clamp_max"):
         help = """
         Sets the value of the clamp_grad limitation. Default is 0.05, providing for smoother, more muted coloration in images, but setting higher values `(0.15-0.3)` can provide interesting contrast and vibrancy.
@@ -470,7 +521,7 @@ async def placeholder(ctx, job_uuid):
     with get_database() as client:
         client.database.get_collection("queue").update_one({"uuid": job_uuid}, {"$set": {"progress_msg": msg.id}})
 
-async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed, symmetry, symmetry_loss_scale):
+async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed, symmetry, symmetry_loss_scale, cut_schedule, diffusion_model):
     reject = False
     reasons = []
     with get_database() as client:
@@ -501,8 +552,10 @@ async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_gui
                 "steps": steps, 
                 "shape": shape, 
                 "model": model,
+                "diffusion_model": diffusion_model,
                 "symmetry": symmetry,
                 "symmetry_loss_scale": symmetry_loss_scale,
+                "cut_schedule": cut_schedule,
                 "clip_guidance_scale": clip_guidance_scale,
                 "clamp_max" : clamp_max,
                 "set_seed" : set_seed,
@@ -542,6 +595,66 @@ async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_gui
     else:
         await ctx.respond("\n".join(reasons))
 
+@bot.command(description="Mutate a Disco Diffusion Render")
+async def mutate(
+    ctx,
+    job_uuid: discord.Option(str, "Job UUID to mutate", required=True),
+    text_prompt: discord.Option(str, "Enter your text prompt", required=False),
+    steps: discord.Option(int, "Number of steps", required=False),
+    shape: discord.Option(str, "Image Shape", required=False, choices=[
+        discord.OptionChoice("Landscape", value="landscape"),
+        discord.OptionChoice("Portrait", value="portrait"),
+        discord.OptionChoice("Square", value="square"),
+        discord.OptionChoice("Tiny Square", value="tiny-square"),
+        discord.OptionChoice("Panoramic", value="pano")
+    ]),
+    model: discord.Option(str, "Models", required=False, choices=[
+        discord.OptionChoice("Default (ViTB16+32, RN50)", value="default"),
+        discord.OptionChoice("ViTB16+32, RN50x64", value="rn50x64"),
+        discord.OptionChoice("ViTB16+32, ViTL14", value="vitl14"),
+        discord.OptionChoice("ViTB16+32, ViTL14x336", value="vitl14x336"),
+    ]),
+    clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False),
+    cut_ic_pow: discord.Option(int, "CLIP Innercut Power", required=False),
+    sat_scale: discord.Option(int, "Saturation Scale", required=False),
+    clamp_max: discord.Option(str, "Clamp Max", required=False),
+    set_seed: discord.Option(int, "Seed", required=False),
+    symmetry: discord.Option(str, "Symmetry", required=False, choices=[
+        discord.OptionChoice("No", value="no"),
+        discord.OptionChoice("Yes", value="yes"),
+    ]),
+    cut_schedule: discord.Option(str, "Cut Schedule", required=False, choices=[
+        discord.OptionChoice("Default", value="default"),
+        discord.OptionChoice("Detailed A", value="detailed-a"),
+        discord.OptionChoice("Detailed B", value="detailed-b"),
+        discord.OptionChoice("RAM Efficient", value="ram-efficient"),
+        discord.OptionChoice("Potato", value="potato"),
+    ]),
+    diffusion_model: discord.Option(str, "Diffusion Model", required=False, choices=[
+        discord.OptionChoice("512x512_diffusion_uncond_finetune_008100", value="512x512_diffusion_uncond_finetune_008100"),
+        discord.OptionChoice("256x256_diffusion_uncond", value="256x256_diffusion_uncond"),
+        discord.OptionChoice("pixel_art_diffusion_hard_256", value="pixel_art_diffusion_hard_256"),
+        discord.OptionChoice("pixel_art_diffusion_soft_256", value="pixel_art_diffusion_soft_256"),
+        discord.OptionChoice("256x256_openai_comics_faces_by_alex_spirin_084000", value="256x256_openai_comics_faces_by_alex_spirin_084000"),
+        discord.OptionChoice("lsun_uncond_100M_1200K_bs128", value="lsun_uncond_100M_1200K_bs128")
+    ]),
+    symmetry_loss_scale: discord.Option(int, "Symmetry Loss Scale", required=False),
+):
+    with get_database() as client:
+        result = client.database.get_collection("queue").find_one({"uuid": job_uuid}, {'_id': 0})
+    
+    for param in ["text_prompt","steps","shape","model","clip_guidance_scale","cut_ic_pow","sat_scale","clamp_max","set_seed","symmetry","cut_schedule","diffusion_model","symmetry_loss_scale"]:
+        if locals()[param]:
+            value = locals()[param]
+            logger.info(f"Mutating {param} to {value}")
+            result[param] = value
+        else:
+            logger.info(f"Keeping {param} as {result[param]}")
+            
+
+    await do_render(ctx, "render", result["text_prompt"], result["steps"], result["shape"], result["model"], result["clip_guidance_scale"], 
+        result["cut_ic_pow"], result["sat_scale"], result["clamp_max"], result["set_seed"], result["symmetry"], result["symmetry_loss_scale"], result["cut_schedule"], result["diffusion_model"])
+
 
 @bot.command(description="Submit a Disco Diffusion Render Request")
 async def render(
@@ -552,6 +665,7 @@ async def render(
         discord.OptionChoice("Landscape", value="landscape"),
         discord.OptionChoice("Portrait", value="portrait"),
         discord.OptionChoice("Square", value="square"),
+        discord.OptionChoice("Tiny Square", value="tiny-square"),
         discord.OptionChoice("Panoramic", value="pano")
     ]),
     model: discord.Option(str, "Models", required=False, default="default", choices=[
@@ -569,9 +683,24 @@ async def render(
         discord.OptionChoice("No", value="no"),
         discord.OptionChoice("Yes", value="yes"),
     ]),
+    cut_schedule: discord.Option(str, "Cut Schedule", required=False, default="default", choices=[
+        discord.OptionChoice("Default", value="default"),
+        discord.OptionChoice("Detailed A", value="detailed-a"),
+        discord.OptionChoice("Detailed B", value="detailed-b"),
+        discord.OptionChoice("RAM Efficient", value="ram-efficient"),
+        discord.OptionChoice("Potato", value="potato"),
+    ]),
+    diffusion_model: discord.Option(str, "Diffusion Model", required=False, default="512x512_diffusion_uncond_finetune_008100", choices=[
+        discord.OptionChoice("512x512_diffusion_uncond_finetune_008100", value="512x512_diffusion_uncond_finetune_008100"),
+        discord.OptionChoice("256x256_diffusion_uncond", value="256x256_diffusion_uncond"),
+        discord.OptionChoice("pixel_art_diffusion_hard_256", value="pixel_art_diffusion_hard_256"),
+        discord.OptionChoice("pixel_art_diffusion_soft_256", value="pixel_art_diffusion_soft_256"),
+        discord.OptionChoice("256x256_openai_comics_faces_by_alex_spirin_084000", value="256x256_openai_comics_faces_by_alex_spirin_084000"),
+        discord.OptionChoice("lsun_uncond_100M_1200K_bs128", value="lsun_uncond_100M_1200K_bs128")
+    ]),
     symmetry_loss_scale: discord.Option(int, "Symmetry Loss Scale", required=False, default=1500),
 ):
-    await do_render(ctx, "render", text_prompt, steps, shape, model, clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed, symmetry, symmetry_loss_scale)
+    await do_render(ctx, "render", text_prompt, steps, shape, model, clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed, symmetry, symmetry_loss_scale, cut_schedule, diffusion_model)
 
 @bot.command(description="Submit a Disco Diffusion Sketch Request (will jump queue)")
 async def sketch(
@@ -581,6 +710,7 @@ async def sketch(
         discord.OptionChoice("Landscape", value="landscape"),
         discord.OptionChoice("Portrait", value="portrait"),
         discord.OptionChoice("Square", value="square"),
+        discord.OptionChoice("Tiny Square", value="tiny-square"),
         discord.OptionChoice("Panoramic", value="pano")
     ]),
     clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False, default=5000),
@@ -588,13 +718,31 @@ async def sketch(
     sat_scale: discord.Option(int, "Saturation Scale", required=False, default=0),
     clamp_max: discord.Option(str, "Clamp Max", required=False, default="0.05"),
     set_seed: discord.Option(int, "Seed", required=False, default=-1),
+    steps: discord.Option(str, "Diffusion Model", required=False, default=50, choices=[
+        discord.OptionChoice("50", value="50"),
+        discord.OptionChoice("100", value="100"),
+    ]),
     symmetry: discord.Option(str, "Symmetry", required=False, default="no", choices=[
         discord.OptionChoice("No", value="no"),
         discord.OptionChoice("Yes", value="yes"),
     ]),
     symmetry_loss_scale: discord.Option(int, "Symmetry Loss Scale", required=False, default=1500),
+    cut_schedule: discord.Option(str, "Cut Schedule", required=False, default="default", choices=[
+        discord.OptionChoice("Detailed A", value="detailed-a"),
+        discord.OptionChoice("Detailed B", value="detailed-b"),
+        discord.OptionChoice("RAM Efficient", value="ram-efficient"),
+        discord.OptionChoice("Potato", value="potato"),
+    ]),
+    diffusion_model: discord.Option(str, "Diffusion Model", required=False, default="512x512_diffusion_uncond_finetune_008100", choices=[
+        discord.OptionChoice("512x512_diffusion_uncond_finetune_008100", value="512x512_diffusion_uncond_finetune_008100"),
+        discord.OptionChoice("256x256_diffusion_uncond", value="256x256_diffusion_uncond"),
+        discord.OptionChoice("pixel_art_diffusion_hard_256", value="pixel_art_diffusion_hard_256"),
+        discord.OptionChoice("pixel_art_diffusion_soft_256", value="pixel_art_diffusion_soft_256"),
+        discord.OptionChoice("256x256_openai_comics_faces_by_alex_spirin_084000", value="256x256_openai_comics_faces_by_alex_spirin_084000"),
+        discord.OptionChoice("lsun_uncond_100M_1200K_bs128", value="lsun_uncond_100M_1200K_bs128")
+    ]),
 ):
-    await do_render(ctx, "sketch", text_prompt, 50, shape, "default", clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed, symmetry, symmetry_loss_scale)
+    await do_render(ctx, "sketch", text_prompt, int(steps), shape, "default", clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed, symmetry, symmetry_loss_scale, cut_schedule, diffusion_model)
 
 # @bot.command(description="Nuke Render Queue (debug)")
 # async def nuke(ctx):
@@ -679,7 +827,10 @@ async def repeat(ctx, job_uuid):
         result["progress_msg"] = None
         result["duration"] = 0
         result["mode"] = 'repeat'
-        render_type = result["render_type"]
+        try:
+            render_type = result["render_type"]
+        except:
+            render_type = "render"
         result = client.database.get_collection("queue").insert_one(result)
         insertID = result
         botspam_channels = ["botspam"]
@@ -807,8 +958,6 @@ async def query_queue(ctx, who, status):
                 user = await bot.fetch_user(job.get("author"))
                 summary = f"""
                 - 🧑‍🦲 Author: <@{job.get('author')}>
-                - ✍️ Text Prompt: `{job.get('text_prompt')}`
-                - Mode: `{job.get('mode')}`
                 - Status: `{job.get('status')}`
                 - Progress: `{job.get('percent')}%`
                 - Timestamp: `{job.get('timestamp')}`
@@ -822,26 +971,41 @@ async def query_queue(ctx, who, status):
 async def myhistory(ctx):
     await query_queue(ctx, who = "me", status = "all")
 
-@bot.command()
-async def agents(ctx):
-    # https://docs.pycord.dev/en/master/api.html?highlight=embed#discord.Embed
-    embed = discord.Embed(
-        title="Agent Status",
-        description="The following agents appear active:",
-        color=discord.Colour.blurple(),  # Pycord provides a class with default colors you can choose from
-    )
 
+async def agent_status(channel, messageid):
+    channel = bot.get_channel(channel)  
+    table = Texttable(120)
+    table.set_deco(Texttable.HEADER)
+    # 't',  # text
+    # 'f',  # float (decimal)
+    # 'e',  # float (exponent)
+    # 'i',  # integer
+    # 'a'
+    table.set_cols_dtype(['a','a','a','a','a']) # automatic
+    # table.set_cols_align(["l", "r", "r", "r", "l"])
+    data = []
+    data.append(["Agent", "Last Seen", "Score", "Mode", "GPU Stats"])
+    # await ctx.respond(f"""```\n{t}\n```""")
     with get_database() as client:
-        agents = client.database.get_collection("agents").find()
-
+        # query = {"$query": q, "$orderby": {"timestamp": -1}}
+        # queue = client.database.get_collection("queue").find(query).limit(10)
+        agents = client.database.get_collection("agents").find().sort("last_seen",-1)
+        
         for a, agent in enumerate(agents):
-            embed.add_field(name=agent.get("agent_id"), value=f"""
-            - Last Seen: `{agent.get('last_seen')}`
-            - Score: `{agent.get('score')}`
-            - Idle Time: `{agent.get('idle_time')} sec`
-            - Mode: `{agent.get('mode')}`
-            """, inline=False)
-        await ctx.respond(embed=embed)
+            gpustats = agent.get('gpustats')
+            if gpustats:
+                gpustats = str(gpustats).replace("\n","")
+            data.append([agent.get("agent_id"),agent.get('last_seen'),agent.get('score'),agent.get('mode'),gpustats])
+           
+        table.add_rows(data)
+        t = table.draw()
+        if messageid != None:
+            message = await channel.fetch_message(messageid)
+            # await message.edit(embed = embed)
+            await message.edit(f"""```\n{t[:1500]}\n```""")
+        else:
+            # await channel.send(embed = embed)
+            await message.send(f"""```\n{t[:1900]}\n```""")
 
 
 if __name__ == "__main__":

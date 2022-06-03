@@ -69,16 +69,34 @@ def pulse(agent_id):
         agentCollection.update_one({"agent_id": agent_id},
         {"$set": {"last_seen": datetime.now()}})
 
+@app.route("/query/<job_uuid>", methods=["GET"])
+def query(job_uuid):
+    with get_database() as client:
+        queueCollection = client.database.get_collection("queue")
+        job = queueCollection.find_one({"uuid" : job_uuid})
+        return dumps(job)
+
+@app.route("/myhistory/<author_id>", methods=["GET"])
+def myhistory(author_id):
+    with get_database() as client:
+        queueCollection = client.database.get_collection("queue")
+        jobs = queueCollection.find({"author" : int(author_id)})
+        return dumps(jobs)
+
 @app.route("/reject/<agent_id>/<job_uuid>", methods=["POST"])
 def reject(agent_id, job_uuid):
     pulse(agent_id=agent_id)
     logger.error(f"rejecting {job_uuid}")
+    tb = request.form.get('traceback')
+    log = request.form.get('log')
+    logger.info(log)
+    logger.info(tb)
     if request.method == "POST":
         with get_database() as client:
             queueCollection = client.database.get_collection("queue")
             results = queueCollection.update_one({
                 "agent_id": agent_id, 
-                "uuid": job_uuid}, {"$set": {"status": "failed", "filename": None}})
+                "uuid": job_uuid}, {"$set": {"status": "failed", "filename": None, "log":log, "traceback":tb}})
             count = results.modified_count
         if count == 0:
             return f"cannot find that job."
@@ -106,17 +124,21 @@ def upload_log(agent_id, job_uuid):
 
 @app.route("/progress/<agent_id>/<job_uuid>", methods=["GET", "POST"])
 def progress(agent_id, job_uuid):
+    pulse(agent_id=agent_id)
     if request.method == "POST":
+        gpustats = request.form.get('gpustats')
         e = {
             "type" : "progress",
             "agent" : agent_id,
             "job_uuid" : job_uuid,
-            "percent" : request.form.get('percent')
+            "percent" : request.form.get('percent'),
+            "gpustats" : gpustats
         }
         event(e)
         # logger.info(e)
-
         with get_database() as client:
+            agentCollection = client.database.get_collection("agents")
+            agentCollection.update_one({"agent_id": agent_id}, {"$set": {"gpustats": gpustats}})
             queueCollection = client.database.get_collection("queue")
             results = queueCollection.update_one({
                 "agent_id": agent_id, 
@@ -255,7 +277,7 @@ def clearevents():
 def takeorder(agent_id, idle_time):
     pulse(agent_id=agent_id)
     mode = "awake"
-    if int(idle_time) > 30:
+    if int(idle_time) > 300:
         mode = "dreaming"
     else:
         mode = "awake"
@@ -356,6 +378,9 @@ def dream(agent_id):
     clip_guidance_scale = random.sample([
         5000, 7500, 10000, 15000, 20000
     ],1)[0]
+    cut_schedule = random.sample([
+        "default", "ram-efficient", "detailed-a", "detailed-b"
+    ],1)[0]
     sat_scale = random.sample([
         0, 100, 500, 1000, 5000, 10000, 20000
     ],1)[0]
@@ -372,10 +397,12 @@ def dream(agent_id):
             "shape": shape, 
             "model": model,
             "clip_guidance_scale": clip_guidance_scale,
+            "diffusion_model": "512x512_diffusion_uncond_finetune_008100",
             "clamp_max" : 0.05,
             "cut_ic_pow": cut_ic_pow,
             "sat_scale": sat_scale,
             "set_seed" : -1,
+            "cut_schedule" : cut_schedule,
             "author": 977198605221912616,
             "status": "processing",
             "timestamp": datetime.utcnow()}
