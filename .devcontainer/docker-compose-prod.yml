@@ -22,4 +22,11 @@ services:
     image: mongo:latest
     hostname: mongodb
     restart: unless-stopped
+    volumes:
+      - /home/ec2-user/appdata/dd-bot-db/db:/data/db
+      - /home/ec2-user/appdata/dd-bot-db/config:/data/configdb
     # As in the "app" service, use "forwardPorts" in **devcontainer.json** to forward an app port locally.
+networks:
+  default:
+    external:
+      name: dd_bot

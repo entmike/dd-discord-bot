@@ -1,6 +1,7 @@
+import jsbeautifier
 import os, sys
 from webbrowser import get
-from flask import Flask, flash, request, redirect, url_for
+from flask import Flask, flash, request, redirect, url_for, jsonify
 from dotenv import load_dotenv
 from yaml import dump, full_load
 from werkzeug.utils import secure_filename
@@ -74,14 +75,16 @@ def query(job_uuid):
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
         job = queueCollection.find_one({"uuid" : job_uuid})
-        return dumps(job)
+        opts = jsbeautifier.default_options()
+        opts.indent_size = 2
+        return jsonify(json.loads(dumps(job)))
 
 @app.route("/myhistory/<author_id>", methods=["GET"])
 def myhistory(author_id):
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
         jobs = queueCollection.find({"author" : int(author_id)})
-        return dumps(jobs)
+        return jsonify(json.loads(dumps(jobs)))
 
 @app.route("/reject/<agent_id>/<job_uuid>", methods=["POST"])
 def reject(agent_id, job_uuid):
@@ -340,21 +343,27 @@ def dream(agent_id):
     import dd_prompt_salad
     job_uuid = uuid.uuid4()
     templates = [
-        "Random starlight {things} flying in {location} {colors}, by {artists}",
-        "a horrific decaying {locations} drenched in gory {colors}, art by {artists}",
-        "an ominous figure standing in a small room surrounded by {things}s, surveillance footage",
-        "a highly detailed {adjectives} nebula with majestic planets of {of_something}, art by {progrock/artist}, trending on artstation",
-        "a beautiful watercolor painting of a {adjectives} {animals} in {locations}, art by {artists}, trending on artstation",
-        "an ominous sculpture of {animals}s in the shape of {shapes} made of {of_something}, digital painting",
-        "a horrible {adjectives} {adjectives} fuzzy {locations} soaked in {things}, art by {artists}",
-        "a colorful galactic {locations} colored {colors}, art by {artists}",
-        "a {things} sinking in a {locations} covered in {things}s, watercolor, trending on artstation",
-        "an immaculately detailed gothic painting of a {things} surrounded by majestic {things}, art by {artists}, {styles} style",
+        "Ellen Jewett, beautiful surreal palatial {things} at dawn, gustave dore, ferdinand knab, {artists}",
+        "a beautifully ultradetailed painting of a mysterious {colors} {location} on top of a {locations} on the side of a mountain filled with giant orange and purple crystals illuminated by pastel pink fireflies, icy blue mist, morning shot, Alena Aenami, Raphael Lacoste, Makoto Shinkai, 4k, trending on artstation",
+        "multiple colorful globes full of {things}s swirling around a hellscape, crystals illuminating the night sky",
+        "horrific zombies chasing {things}s around a {location}, art by {artists}",
+        "hairy colorful balls of yarn in the shape of a {things}, 35mm, f1.4, bokeh",
+        "A beautiful painting of a vintage network map with communities seen from above by {artists}, {artists}, {artists} and {artists}"
+        # "Random starlight {things} flying in {location} {colors}, by {artists}",
+        # "a horrific decaying {locations} drenched in gory {colors}, art by {artists}",
+        # "an ominous figure standing in a small room surrounded by {things}s, surveillance footage",
+        # "a highly detailed {adjectives} nebula with majestic planets of {of_something}, art by {progrock/artist}, trending on artstation",
+        # "a beautiful watercolor painting of a {adjectives} {animals} in {locations}, art by {artists}, trending on artstation",
+        # "an ominous sculpture of {animals}s in the shape of {shapes} made of {of_something}, digital painting",
+        # "a horrible {adjectives} {adjectives} fuzzy {locations} soaked in {things}, art by {artists}",
+        # "a colorful galactic {locations} colored {colors}, art by {artists}",
+        # "a {things} sinking in a {locations} covered in {things}s, watercolor, trending on artstation",
+        # "an immaculately detailed gothic painting of a {things} surrounded by majestic {things}, art by {artists}, {styles} style",
         # "{progrock/adjective} ophanim, tarot card, {progrock/style}",
         # "a {progrock/adjective} photo of a {locations} taken by {progrock/artist}, UHD, photorealistic",
-        "a verdant overgrown {locations}, {progrock/style}",
-        "{progrock/adjective} {colors} {shapes}s, vector art by {progrock/artist}",
-        "A beautiful landscape on an alien planet with giant {things}s, and {adjectives} vegetation Giant {colors} and {things} in the {locations} by {artists}, greg rutkowski, {artists}, {artists}, {artists} Trending on artstation and SF ART"
+        # "a verdant overgrown {locations}, {progrock/style}",
+        # "{progrock/adjective} {colors} {shapes}s, vector art by {progrock/artist}",
+        # "A beautiful landscape on an alien planet with giant {things}s, and {adjectives} vegetation Giant {colors} and {things} in the {locations} by {artists}, greg rutkowski, {artists}, {artists}, {artists} Trending on artstation and SF ART"
         # "The {colors} of the {locations} is a representation of the Viking's obsession with the {locations}",
         # "The Korean girl is doing a {progrock/adjective} {progrock/style} painting in the digital age",
         # "The face of the {animals} is now etched in the {progrock/style} art of Japan",
@@ -367,7 +376,10 @@ def dream(agent_id):
         "square", "pano", "landscape","portrait"
     ],1)[0]
     model = random.sample([
-        "default", "rn50x64", "vitl14","vitl14x336"
+        "default",
+        "rn50x64",
+        # "vitl14",
+        "vitl14x336"
     ],1)[0]
     steps = random.sample([
         150, 200, 250, 300, 400

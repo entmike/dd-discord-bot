@@ -69,7 +69,7 @@ async def queueBroadcast(who, status, author=None, channel = None, messageid=Non
             """
             msgid = job.get("progress_msg")
             if msgid:
-                link = f"[{job.get('uuid')}](https://discord.com/channels/945459234194219029/{channel_id}/{msgid}) (<@{job.get('author')}>)\nProgress: `{job.get('percent')}%`"
+                link = f"[{job.get('uuid')}](https://discord.com/channels/945459234194219029/{channel_id}/{msgid}) (<@{job.get('author')}>)\nProgress: `{job.get('percent')}%` | Agent: `{job.get('agent_id')}`"
                 embed.add_field(name=f"🎨 {job.get('uuid')}", value=link, inline=False)
             else:
                 embed.add_field(name=f"🎨 {job.get('uuid')}", value=f"{job.get('uuid')} (<@{job.get('author')}>)\nProgress: `{job.get('percent')}%`", inline=False)
@@ -325,7 +325,7 @@ def retrieve_log(uuid):
         return embed, file, view
 
 def retrieve(uuid):
-    logger.info(f"Retrieving {uuid}")
+    # logger.info(f"Retrieving {uuid}")
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
         completedJob = queueCollection.find_one({"uuid": uuid})
@@ -351,7 +351,7 @@ def retrieve(uuid):
             color = discord.Colour.green()
         if status == "queued":
             color = discord.Colour.blurple()
-        logger.info(f"{uuid} - {status}")
+        # logger.info(f"{uuid} - {status}")
         embed = discord.Embed(
             description=f"Author: <@{completedJob.get('author')}>\n`{completedJob.get('uuid')}`\nStatus: `{status}`",
             color=color,
@@ -409,7 +409,7 @@ def retrieve(uuid):
         # view.add_item(detButton)
         # view.add_item(hateButton)
         preview = completedJob.get("preview")
-        logger.info(preview)
+        # logger.info(preview)
         fn = ""
         if preview == True:
             fn =f"{uuid}_progress.png"
@@ -611,7 +611,7 @@ async def mutate(
     model: discord.Option(str, "Models", required=False, choices=[
         discord.OptionChoice("Default (ViTB16+32, RN50)", value="default"),
         discord.OptionChoice("ViTB16+32, RN50x64", value="rn50x64"),
-        discord.OptionChoice("ViTB16+32, ViTL14", value="vitl14"),
+        # discord.OptionChoice("ViTB16+32, ViTL14", value="vitl14"),
         discord.OptionChoice("ViTB16+32, ViTL14x336", value="vitl14x336"),
     ]),
     clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False),
@@ -649,7 +649,11 @@ async def mutate(
             logger.info(f"Mutating {param} to {value}")
             result[param] = value
         else:
-            logger.info(f"Keeping {param} as {result[param]}")
+            if param in result:
+                logger.info(f"Keeping {param} as {result[param]}")
+            else:
+                logger.info(f"{param} not present in original job.")
+                result[param] = None
             
 
     await do_render(ctx, "render", result["text_prompt"], result["steps"], result["shape"], result["model"], result["clip_guidance_scale"], 
@@ -671,7 +675,7 @@ async def render(
     model: discord.Option(str, "Models", required=False, default="default", choices=[
         discord.OptionChoice("Default (ViTB16+32, RN50)", value="default"),
         discord.OptionChoice("ViTB16+32, RN50x64", value="rn50x64"),
-        discord.OptionChoice("ViTB16+32, ViTL14", value="vitl14"),
+        # discord.OptionChoice("ViTB16+32, ViTL14", value="vitl14"),
         discord.OptionChoice("ViTB16+32, ViTL14x336", value="vitl14x336"),
     ]),
     clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False, default=5000),
@@ -864,11 +868,12 @@ async def repeat(ctx, job_uuid):
 
 @bot.command(description="Get details of a render request")
 async def query(ctx, uuid):
-    with get_database() as client:
-        result = client.database.get_collection("queue").find_one({"uuid": uuid})
-        await ctx.respond(f"""```
-        {json.loads(dumps(result))}
-        ```""")
+    await ctx.respond(f"https://api.feverdreams.app/query/{uuid}")
+    # with get_database() as client:
+        # result = client.database.get_collection("queue").find_one({"uuid": uuid})
+        # await ctx.respond(f"""```
+        # {json.loads(dumps(result))}
+        # ```""")
 
 @bot.command(description="View queue statistics")
 async def queuestats(ctx):

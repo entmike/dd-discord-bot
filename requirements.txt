@@ -12,4 +12,5 @@ pymongo
 dnspython
 waitress
 texttable
+jsbeautifier
 # git+https://github.com/dimitrismistriotis/profanity-check
