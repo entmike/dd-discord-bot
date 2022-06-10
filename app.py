@@ -1,7 +1,7 @@
 import jsbeautifier
 import os, sys
 from webbrowser import get
-from flask import Flask, flash, request, redirect, url_for, jsonify
+from flask import Flask, flash, request, redirect, url_for, jsonify, send_file
 from dotenv import load_dotenv
 from yaml import dump, full_load
 from werkzeug.utils import secure_filename
@@ -41,9 +41,6 @@ def event(event):
         eventTable.insert_one({"timestamp": datetime.now(), "ack": False, "uuid": str(uuid.uuid4()), "event" : event})
     # logger.info(f"Event logged: {event}")
 
-# @app.route("/job/<job_uuid>")
-# def job(job_uuid):
-
 @app.route("/register/<agent_id>")
 def register(agent_id):
     status = ""
@@ -79,12 +76,53 @@ def query(job_uuid):
         opts.indent_size = 2
         return jsonify(json.loads(dumps(job)))
 
-@app.route("/myhistory/<author_id>", methods=["GET"])
-def myhistory(author_id):
+@app.route("/rejects", methods=["GET"])
+def rejects():
+    with get_database() as client:
+        queue = client.database.get_collection("queue").find({"$query": {"status": "rejected"}, "$orderby": {"timestamp": -1}})
+        return dumps(queue)
+
+@app.route("/myhistory/<author_id>", methods=["GET"], defaults={'status': 'all'})
+@app.route("/myhistory/<author_id>/<status>", methods=["GET"])
+def myhistory(author_id, status):
+    if status == 'all':
+        q = {"author" : int(author_id)}
+    else:
+        q = {"author" : int(author_id), "status" : status}
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
-        jobs = queueCollection.find({"author" : int(author_id)})
+        jobs = queueCollection.find(q)
         return jsonify(json.loads(dumps(jobs)))
+
+@app.route("/job/<job_uuid>", methods=["GET"])
+def job(job_uuid):
+    with get_database() as client:
+        queueCollection = client.database.get_collection("queue")
+        job = queueCollection.find_one({"uuid" : job_uuid})
+        return dumps(job)
+
+@app.route("/config/<job_uuid>", methods=["GET"])
+def config(job_uuid):
+    try:
+        filename = f"{job_uuid}_gen.yaml"
+        fn = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        return send_file(fn, mimetype='text/yaml')
+    except:
+        return f"Could not locate {filename}.  This might be because the render has not completed yet.  Or because Mike sucks."
+
+@app.route("/image/<job_uuid>", methods=["GET"])
+def image(job_uuid):
+    try:
+        filename = f"{job_uuid}0_0.png"
+        fn = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        return send_file(fn, mimetype='image/png')
+    except:
+        return f"Could not locate {filename}.  This might be because the render has not completed yet.  Or because the job failed.  Or check your job uuid.  Or a gremlin ate the image.  Probably the gremlin."
+# @app.route("/image/<job_uuid>", methods=["GET"])
+# def image(job_uuid):
+#     filename = f"{job_uuid}(0)_0.png"
+#     fn = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+#     return send_file(fn, mimetype='image/png')
 
 @app.route("/reject/<agent_id>/<job_uuid>", methods=["POST"])
 def reject(agent_id, job_uuid):
@@ -125,11 +163,34 @@ def upload_log(agent_id, job_uuid):
         else:
             return "Log uploaded."
 
+@app.route("/uploadconfig/<agent_id>/<job_uuid>", methods=["POST"])
+def upload_config(agent_id, job_uuid):
+    file = request.files["file"]
+    filename = secure_filename(file.filename)
+    file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
+    with open(os.path.join(app.config["UPLOAD_FOLDER"], filename), "r") as f:
+        run_log = f.read()
+
+    with get_database() as client:
+        queueCollection = client.database.get_collection("queue")
+        results = queueCollection.update_one({
+            "agent_id": agent_id, 
+            "uuid": job_uuid}, {"$set": {"config": filename}})
+        count = results.modified_count
+        if count == 0:
+            return f"cannot find that job."
+        else:
+            return "Config uploaded."
+
 @app.route("/progress/<agent_id>/<job_uuid>", methods=["GET", "POST"])
 def progress(agent_id, job_uuid):
     pulse(agent_id=agent_id)
     if request.method == "POST":
         gpustats = request.form.get('gpustats')
+        if gpustats:
+            memory = int(gpustats.split(", ")[4])
+        else:
+            memory = 0
         e = {
             "type" : "progress",
             "agent" : agent_id,
@@ -143,9 +204,19 @@ def progress(agent_id, job_uuid):
             agentCollection = client.database.get_collection("agents")
             agentCollection.update_one({"agent_id": agent_id}, {"$set": {"gpustats": gpustats}})
             queueCollection = client.database.get_collection("queue")
+            job = queueCollection.find_one({"uuid": job_uuid})
+            if job:
+                # Calc high watermark in memory
+                if job.get("mem_hwm"):
+                    hwm = int(job.get("mem_hwm"))
+                    if memory > hwm:
+                        hwm = memory
+                else:
+                    hwm = memory
+            # logger.info(f"{hwm} - {memory}")
             results = queueCollection.update_one({
                 "agent_id": agent_id, 
-                "uuid": job_uuid}, {"$set": {"percent": request.form.get('percent')}})
+                "uuid": job_uuid}, {"$set": {"percent": request.form.get('percent'), "mem_hwm":hwm}})
             count = results.modified_count
             if count == 0:
                 return f"cannot find that job."
@@ -276,66 +347,69 @@ def clearevents():
             logCollection.drop()
     return "dropped events"
 
-@app.route("/takeorder/<agent_id>/<idle_time>")
-def takeorder(agent_id, idle_time):
-    pulse(agent_id=agent_id)
-    mode = "awake"
-    if int(idle_time) > 300:
-        mode = "dreaming"
-    else:
+@app.route("/takeorder/<agent_id>", methods = ["POST"])
+def takeorder(agent_id):
+    if request.method == "POST":
+        idle_time = request.form.get('idle_time')
+        model = request.form.get('model')
+        pulse(agent_id=agent_id)
         mode = "awake"
-    with get_database() as client:
-            agentCollection = client.database.get_collection("agents")
-            agentCollection.update_one({"agent_id": agent_id}, {"$set": {"mode": mode}})
-            logger.info(f"{agent_id} is {mode}...")
-    with get_database() as client:
-        agentCollection = client.database.get_collection("agents")
-        agentCollection.update_one({"agent_id": agent_id}, {"$set": {"idle_time": int(idle_time)}})
-    logger.info(f"{agent_id} looking for work, idle time {idle_time} seconds...")
-    with get_database() as client:
-        queueCollection = client.database.get_collection("queue")
-        query = {"status": "processing", "agent_id": agent_id}
-        jobCount = queueCollection.count_documents(query)
-        if jobCount > 0:
-            # Update status
-            agentCollection = client.database.get_collection("agents")
-            agentCollection.update_one({"agent_id": agent_id}, {"$set": {"mode": "working", "idle_time": 0}})
-            jobs = queueCollection.find_one(query)           
-            logger.info("working")
-            return dumps({"message ": f"You already have a job.  (Job '{jobs.get('uuid')}')", 
-                "uuid": jobs.get("uuid"), 
-                "details":json.loads(dumps(jobs)),
-                "success": True
-            })
+        if int(idle_time) > 300:
+            mode = "dreaming"
         else:
-            # Check for sketches first
-            query = {"status": "queued", "render_type": "sketch"}
-            queueCount = queueCollection.count_documents(query)
-            logger.info(f"{queueCount} sketches in queue.")
-            if queueCount == 0:
-                query = {"status": "queued"}
-                queueCount = queueCollection.count_documents(query)
-                logger.info(f"{queueCount} renders in queue.")
-
-            if queueCount > 0:
-                # Work found
-                job = queueCollection.find_one({"$query": query, "$orderby": {"timestamp": 1}})
-                results = queueCollection.update_one({"uuid": job.get("uuid")}, {"$set": {"status": "processing", "agent_id": agent_id}})
-                count = results.modified_count
-                if count > 0:
-                    log(f"Good news, <@{job.get('author')}>!  Your job `{job.get('uuid')}` is being processed now by `{agent_id}`...", title="💼 Job in Process")
-                    agentCollection = client.database.get_collection("agents")
-                    agentCollection.update_one({"agent_id": agent_id}, {"$set": {"mode": "working", "idle_time":0}})
-                    return dumps({"message": f"Your current job is {job.get('uuid')}.", "uuid": job.get("uuid"), "details":json.loads(dumps(job)), "success": True})
+            mode = "awake"
+        with get_database() as client:
+                agentCollection = client.database.get_collection("agents")
+                agentCollection.update_one({"agent_id": agent_id}, {"$set": {"mode": mode, "model_mode" : model}})
+                logger.info(f"{agent_id} is {mode}...")
+        with get_database() as client:
+            agentCollection = client.database.get_collection("agents")
+            agentCollection.update_one({"agent_id": agent_id}, {"$set": {"idle_time": int(idle_time)}})
+        logger.info(f"{agent_id} looking for work, idle time {idle_time} seconds...")
+        with get_database() as client:
+            queueCollection = client.database.get_collection("queue")
+            query = {"status": "processing", "agent_id": agent_id}
+            jobCount = queueCollection.count_documents(query)
+            if jobCount > 0:
+                # Update status
+                agentCollection = client.database.get_collection("agents")
+                agentCollection.update_one({"agent_id": agent_id}, {"$set": {"mode": "working", "idle_time": 0}})
+                jobs = queueCollection.find_one(query)           
+                logger.info("working")
+                return dumps({"message ": f"You already have a job.  (Job '{jobs.get('uuid')}')", 
+                    "uuid": jobs.get("uuid"), 
+                    "details":json.loads(dumps(jobs)),
+                    "success": True
+                })
             else:
-                # Dream
-                logger.info("No user jobs in queue...")
-                if mode == "awake":
-                    return dumps({"message": f"Could not secure a user job.", "success": False})
-                if mode == "dreaming":
-                    logger.info("Dream Job incoming.")
-                    d = dream(agent_id)
-                    return dumps(d)
+                # Check for sketches first
+                query = {"status": "queued", "render_type": "sketch", "model" : model}
+                queueCount = queueCollection.count_documents(query)
+                logger.info(f"{queueCount} sketches in queue.")
+                if queueCount == 0:
+                    query = {"status": "queued", "model" : model}
+                    queueCount = queueCollection.count_documents(query)
+                    logger.info(f"{queueCount} renders in queue.")
+
+                if queueCount > 0:
+                    # Work found
+                    job = queueCollection.find_one({"$query": query, "$orderby": {"timestamp": 1}})
+                    results = queueCollection.update_one({"uuid": job.get("uuid")}, {"$set": {"status": "processing", "agent_id": agent_id}})
+                    count = results.modified_count
+                    if count > 0:
+                        log(f"Good news, <@{job.get('author')}>!  Your job `{job.get('uuid')}` is being processed now by `{agent_id}`...", title="💼 Job in Process")
+                        agentCollection = client.database.get_collection("agents")
+                        agentCollection.update_one({"agent_id": agent_id}, {"$set": {"mode": "working", "idle_time":0}})
+                        return dumps({"message": f"Your current job is {job.get('uuid')}.", "uuid": job.get("uuid"), "details":json.loads(dumps(job)), "success": True})
+                else:
+                    # Dream
+                    logger.info("No user jobs in queue...")
+                    if mode == "awake":
+                        return dumps({"message": f"Could not secure a user job.", "success": False})
+                    if mode == "dreaming":
+                        logger.info("Dream Job incoming.")
+                        d = dream(agent_id)
+                        return dumps(d)
 
     return dumps({"message": f"No queued jobs at this time.", "success": False})
 
@@ -343,32 +417,33 @@ def dream(agent_id):
     import dd_prompt_salad
     job_uuid = uuid.uuid4()
     templates = [
-        "Ellen Jewett, beautiful surreal palatial {things} at dawn, gustave dore, ferdinand knab, {artists}",
-        "a beautifully ultradetailed painting of a mysterious {colors} {location} on top of a {locations} on the side of a mountain filled with giant orange and purple crystals illuminated by pastel pink fireflies, icy blue mist, morning shot, Alena Aenami, Raphael Lacoste, Makoto Shinkai, 4k, trending on artstation",
-        "multiple colorful globes full of {things}s swirling around a hellscape, crystals illuminating the night sky",
-        "horrific zombies chasing {things}s around a {location}, art by {artists}",
-        "hairy colorful balls of yarn in the shape of a {things}, 35mm, f1.4, bokeh",
-        "A beautiful painting of a vintage network map with communities seen from above by {artists}, {artists}, {artists} and {artists}"
-        # "Random starlight {things} flying in {location} {colors}, by {artists}",
-        # "a horrific decaying {locations} drenched in gory {colors}, art by {artists}",
+        "beautiful {progrock/style} {progrock/genre} painting of a beatiful scenic mountain range surrounded by {adjectives} {colors} {shapes}s, by {artists} and {artists} and {artists} and {artists}"
+        # # "Ellen Jewett, beautiful surreal palatial {things} at dawn, gustave dore, ferdinand knab, {artists}",
+        # "a beautifully ultradetailed painting of a mysterious {colors} {locations} on top of a {locations} on the side of a mountain filled with giant orange and purple crystals illuminated by pastel pink fireflies, icy blue mist, morning shot, Alena Aenami, Raphael Lacoste, Makoto Shinkai, 4k, trending on artstation",
+        # # "multiple colorful globes full of {things}s swirling around a hellscape, crystals illuminating the night sky",
+        # "horrific zombies chasing {things}s around a {locations}, art by {artists}",
+        # # "hairy colorful balls of yarn in the shape of a {things}, 35mm, f1.4, bokeh",
+        # "A beautiful painting of a vintage network map with communities seen from above by {artists}, {artists}, {artists} and {artists}"
+        # # "Random starlight {things} flying in {location} {colors}, by {artists}",
+        # # "a horrific decaying {locations} drenched in gory {colors}, art by {artists}",
         # "an ominous figure standing in a small room surrounded by {things}s, surveillance footage",
         # "a highly detailed {adjectives} nebula with majestic planets of {of_something}, art by {progrock/artist}, trending on artstation",
         # "a beautiful watercolor painting of a {adjectives} {animals} in {locations}, art by {artists}, trending on artstation",
-        # "an ominous sculpture of {animals}s in the shape of {shapes} made of {of_something}, digital painting",
+        # # "an ominous sculpture of {animals}s in the shape of {shapes} made of {of_something}, digital painting",
         # "a horrible {adjectives} {adjectives} fuzzy {locations} soaked in {things}, art by {artists}",
-        # "a colorful galactic {locations} colored {colors}, art by {artists}",
-        # "a {things} sinking in a {locations} covered in {things}s, watercolor, trending on artstation",
+        # # "a colorful galactic {locations} colored {colors}, art by {artists}",
+        # # "a {things} sinking in a {locations} covered in {things}s, watercolor, trending on artstation",
         # "an immaculately detailed gothic painting of a {things} surrounded by majestic {things}, art by {artists}, {styles} style",
-        # "{progrock/adjective} ophanim, tarot card, {progrock/style}",
-        # "a {progrock/adjective} photo of a {locations} taken by {progrock/artist}, UHD, photorealistic",
+        # # "{progrock/adjective} ophanim, tarot card, {progrock/style}",
+        # # "a {progrock/adjective} photo of a {locations} taken by {progrock/artist}, UHD, photorealistic",
         # "a verdant overgrown {locations}, {progrock/style}",
         # "{progrock/adjective} {colors} {shapes}s, vector art by {progrock/artist}",
-        # "A beautiful landscape on an alien planet with giant {things}s, and {adjectives} vegetation Giant {colors} and {things} in the {locations} by {artists}, greg rutkowski, {artists}, {artists}, {artists} Trending on artstation and SF ART"
+        # "A beautiful landscape on an alien planet with giant {things}s, and {adjectives} vegetation Giant {colors} and {things} in the {locations} by {artists}, greg rutkowski, {artists}, {artists}, {artists} Trending on artstation, behance"
         # "The {colors} of the {locations} is a representation of the Viking's obsession with the {locations}",
-        # "The Korean girl is doing a {progrock/adjective} {progrock/style} painting in the digital age",
-        # "The face of the {animals} is now etched in the {progrock/style} art of Japan",
+        # # "The Korean girl is doing a {progrock/adjective} {progrock/style} painting in the digital age",
+        # # "The face of the {animals} is now etched in the {progrock/style} art of Japan",
         # "The Veiled Virgin Statue by {progrock/artist} covered in {progrock/adjective} cellophane centered in a {locations}",
-        # "{progrock/adjective} {animals} crystal"
+        # # "{progrock/adjective} {animals} crystal"
     ]
     import random
     template = random.sample(templates,1)[0]
@@ -378,23 +453,26 @@ def dream(agent_id):
     model = random.sample([
         "default",
         "rn50x64",
-        # "vitl14",
+        "vitl14",
         "vitl14x336"
     ],1)[0]
     steps = random.sample([
-        150, 200, 250, 300, 400
+        200, 300
     ],1)[0]
     cut_ic_pow = random.sample([
-        1, 5, 10, 20, 50, 100
+        1, 5, 10
     ],1)[0]
     clip_guidance_scale = random.sample([
         5000, 7500, 10000, 15000, 20000
     ],1)[0]
+    cutn_batches = random.sample([
+        4, 6
+    ],1)[0]
     cut_schedule = random.sample([
-        "default", "ram-efficient", "detailed-a", "detailed-b"
+        "default", "detailed-a", "detailed-b"
     ],1)[0]
     sat_scale = random.sample([
-        0, 100, 500, 1000, 5000, 10000, 20000
+        0, 0.5
     ],1)[0]
     with get_database() as client:
         job_uuid = str(job_uuid)
@@ -412,6 +490,7 @@ def dream(agent_id):
             "diffusion_model": "512x512_diffusion_uncond_finetune_008100",
             "clamp_max" : 0.05,
             "cut_ic_pow": cut_ic_pow,
+            "cutn_batches": cutn_batches,
             "sat_scale": sat_scale,
             "set_seed" : -1,
             "cut_schedule" : cut_schedule,

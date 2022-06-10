@@ -1,3 +1,4 @@
+import random
 import traceback
 import datetime
 from random import choices
@@ -25,7 +26,7 @@ from profanity_check import predict_prob
 
 load_dotenv()
 
-agents = ["mike"]
+agents = []
 ticks = 0
 
 async def queueBroadcast(who, status, author=None, channel = None, messageid=None, label="queue"):
@@ -142,6 +143,8 @@ async def task_loop():
                                 channel = "sketches"
                             if render_type == "render":
                                 channel = "images"
+                            if render_type == "mutate":
+                                channel = "mutations"
                             channel = discord.utils.get(bot.get_all_channels(), name=channel)
                             # logger.info(f"Updating message {job.get('progress_msg')}...")
                             try:
@@ -202,6 +205,8 @@ async def task_loop():
                     channel = "sketches"
                 if render_type == "render":
                     channel = "images"
+                if render_type == "mutate":
+                    channel = "mutations"
 
                 if completedJob.get("mode") != "dream":
                     channels = ["images-discussion", channel]
@@ -243,15 +248,19 @@ async def task_loop():
             for channel in botspam_channels:
                 channel = discord.utils.get(bot.get_all_channels(), name=channel)
                 embed = discord.Embed(
-                    title="Ah shit.",
+                    title="😭 Failure 😭",
                     description=f"Job `{completedJob.get('uuid')}` failed, <@{completedJob.get('author')}>!  Blame `{completedJob.get('agent_id')}`",
                     color=discord.Colour.blurple(),
                 )
-                embed.add_field(name="Traceback", value=f"```{completedJob.get('traceback')}```", inline=False)
+                tb = completedJob.get('traceback')
+                if tb:
+                    tb = tb[-600:]
+                    embed.add_field(name="Traceback", value=f"```{tb}```", inline=False)
+                
                 log = completedJob.get('log')
                 if log:
                     log = log[-300:]
-                embed.add_field(name="Log", value=f"```{log}```", inline=False)
+                    embed.add_field(name="Log", value=f"```{log}```", inline=False)
                 # embed, file, view = retrieve(completedJob.get('uuid'))
                 await channel.send(embed=embed)
             queueCollection.update_one({"uuid": completedJob.get("uuid")}, {"$set": {"status": "rejected"}})
@@ -290,6 +299,60 @@ class MyModal(Modal):
         embed.add_field(name="First Input", value=self.children[0].value, inline=False)
         embed.add_field(name="Second Input", value=self.children[1].value, inline=False)
         await interaction.response.send_message(embeds=[embed])
+
+async def do_refresh(job_uuid):
+    embed, file, view = retrieve(job_uuid)
+    logger.info(job_uuid)
+    channels = ["images", "sketches", "images-discussion"]
+    with get_database() as client:
+        queueCollection = client.database.get_collection("queue")
+        job = queueCollection.find_one({"uuid": job_uuid})
+        if job:
+            logger.info(f"{job_uuid} being refreshed in Discord...")
+            for channel in channels:
+                channel = discord.utils.get(bot.get_all_channels(), name=channel)
+                embed, file, view = retrieve(job_uuid)
+                try:
+                    msgid = job.get("progress_msg")
+                    if msgid:
+                        try:
+                            message = await channel.fetch_message(msgid)
+                        except:
+                            message = None
+                        if message:
+                            await message.edit(embed=embed, view=view, file=file)
+                            logger.info(f"{job_uuid} has been refreshed in message {msgid} on Discord...")
+                        # else:
+                        #     await channel.send(embed=embed, view=view, file=file)
+                    # else:
+                    #     await channel.send(embed=embed, view=view, file=file)
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    logger.error(f"💀 Cannot display {job_uuid}\n`{tb}`")
+                    # await channel.send(f"💀 Cannot display {job_uuid}\n`{tb}`")
+
+@bot.slash_command(name="refresh_all", description="Refresh all images (temporary utility command)")
+async def refresh_all(ctx):
+    await ctx.respond("Acknowledged.", delete_after=0)
+    with get_database() as client:
+        queueCollection = client.database.get_collection("queue")
+        jobs = queueCollection.find({})
+        max = 10000000
+        m = 0
+        for job in jobs:
+            if(job.get('progress_msg')):
+                m += 1
+                if m < max:
+                    do_refresh(job.get('uuid'))
+                else:
+                    logger.info(f"{job.get('uuid')} max update reached...")
+            else:
+                logger.info("no")
+
+@bot.slash_command(name="refresh", description="Refresh an image (temporary utility command)")
+async def refresh(ctx, job_uuid):
+    await ctx.respond("Acknowledged.", delete_after=0)
+    await do_refresh(job_uuid)
 
 @bot.slash_command(name="display")
 async def display(ctx, job_uuid):
@@ -352,61 +415,46 @@ def retrieve(uuid):
         if status == "queued":
             color = discord.Colour.blurple()
         # logger.info(f"{uuid} - {status}")
+        details = f"[Job](https://api.feverdreams.app/job/{completedJob.get('uuid')}) | [Config](https://api.feverdreams.app/config/{completedJob.get('uuid')})"
+        if completedJob.get("parent_uuid"):
+            details = f"{details} | Parent: `{completedJob.get('parent_uuid')}`"
         embed = discord.Embed(
-            description=f"Author: <@{completedJob.get('author')}>\n`{completedJob.get('uuid')}`\nStatus: `{status}`",
+            # description=,
             color=color,
             fields= [
+                discord.EmbedField("Author", f"<@{completedJob.get('author')}>", inline=True),
+                discord.EmbedField("Progress", f"`{str(percent)}%`", inline=True),
                 discord.EmbedField("Text Prompt", f"`{completedJob.get('text_prompt')}`", inline=False),
-                discord.EmbedField("Steps", f"`{completedJob.get('steps')}`", inline=True),
-                discord.EmbedField("CLIP Model", f"`{completedJob.get('model')}`", inline=True),
-                discord.EmbedField("Diffusion Model", f"`{completedJob.get('diffusion_model')}`", inline=True),
-                discord.EmbedField("Shape", f"`{completedJob.get('shape')}`", inline=True),
-                discord.EmbedField("Inner Cut Power", f"`{completedJob.get('cut_ic_pow')}`", inline=True),
-                discord.EmbedField("Saturation Scale", f"`{completedJob.get('sat_scale')}`", inline=True),
-                discord.EmbedField("CLIP Guidance Scale", f"`{completedJob.get('clip_guidance_scale')}`", inline=True),
-                discord.EmbedField("Cut Schedule", f"`{completedJob.get('cut_schedule')}`", inline=True),
-                discord.EmbedField("Clamp Max", f"`{str(completedJob.get('clamp_max'))}`", inline=True),
-                discord.EmbedField("Seed", f"`{str(completedJob.get('set_seed'))}`", inline=True),
-                discord.EmbedField("Symmetry", f"`{str(completedJob.get('symmetry'))}`", inline=True),
-                discord.EmbedField("Symmetry Loss Scale", f"`{str(completedJob.get('symmetry_loss_scale'))}`", inline=True),
-                discord.EmbedField("Duration (sec)", f"`{str(math.floor(duration))}`", inline=True),
-                discord.EmbedField("Progress", f"`{str(percent)}%`", inline=True)
+                discord.EmbedField("Details", details, inline=True)
+                # discord.EmbedField("Steps", f"`{completedJob.get('steps')}`", inline=True),
+                # discord.EmbedField("CLIP Model", f"`{completedJob.get('model')}`", inline=True),
+                # discord.EmbedField("Diffusion Model", f"`{completedJob.get('diffusion_model')}`", inline=True),
+                # discord.EmbedField("Shape", f"`{completedJob.get('shape')}`", inline=True),
+                # discord.EmbedField("Inner Cut Power", f"`{completedJob.get('cut_ic_pow')}`", inline=True),
+                # discord.EmbedField("Saturation Scale", f"`{completedJob.get('sat_scale')}`", inline=True),
+                # discord.EmbedField("CLIP Guidance Scale", f"`{completedJob.get('clip_guidance_scale')}`", inline=True),
+                # discord.EmbedField("Cut Schedule", f"`{completedJob.get('cut_schedule')}`", inline=True),
+                # discord.EmbedField("Clamp Max", f"`{str(completedJob.get('clamp_max'))}`", inline=True),
+                # discord.EmbedField("Seed", f"`{str(completedJob.get('set_seed'))}`", inline=True),
+                # discord.EmbedField("Symmetry", f"`{str(completedJob.get('symmetry'))}`", inline=True),
+                # discord.EmbedField("Symmetry Loss Scale", f"`{str(completedJob.get('symmetry_loss_scale'))}`", inline=True),
+                # discord.EmbedField("Duration (sec)", f"`{str(math.floor(duration))}`", inline=True),
+                # discord.EmbedField("Memory HWM", f"`{str(completedJob.get('mem_hwm'))}`", inline=True)
             ]
         )
         embed.set_author(
             name="Fever Dream",
             icon_url="https://cdn.howles.cloud/feverdream.png",
         )
+        embed.set_footer(text = f"{completedJob.get('uuid')}")
 
         view = discord.ui.View()
 
-        async def detCallback(interaction):
-            # await interaction.response.edit_message(content="💖", view=view)
-            with get_database() as client:
-                result = client.database.get_collection("queue").find_one({"uuid": interaction.custom_id})
-                embed = discord.Embed(
-                    title=f"Job {completedJob.get('uuid')} Details",
-                    description=completedJob.get("text_prompt"),
-                    color=discord.Colour.blurple(),
-                    fields= [
-                        discord.EmbedField("Text Prompt", completedJob.get("text_prompt"), inline=True),
-                        # discord.EmbedField("Model", completedJob.get("model"), inline=True),
-                        # discord.EmbedField("Shape", completedJob.get("shape"), inline=True),
-                        # discord.EmbedField("Inner Cut Power", completedJob.get("cut_ic_pow"), inline=True),
-                        # discord.EmbedField("Saturation Scale", completedJob.get("sat_scale"), inline=True),
-                        # discord.EmbedField("CLIP Guidance Scale", completedJob.get("clip_guidance_scale"), inline=True)
-                    ]
-                )
-                embed.set_author(
-                    name=f"Fever Dreams"
-                )
-                await interaction.response.send_message(embed=embed, delete_after=60)
-
-        detButton = discord.ui.Button(label="Details", style=discord.ButtonStyle.green, emoji="🔎", custom_id=completedJob.get('uuid'))
-        detButton.callback = detCallback
+        pinButton = discord.ui.Button(label="Toggle as Favorite", style=discord.ButtonStyle.green, emoji="📌", custom_id=completedJob.get('uuid'))
+        pinButton.callback = pinCallback
         # hateButton = discord.ui.Button(label="Hate it", style=discord.ButtonStyle.danger, emoji="😢")
         # hateButton.callback = hateCallback
-        # view.add_item(detButton)
+        view.add_item(pinButton)
         # view.add_item(hateButton)
         preview = completedJob.get("preview")
         # logger.info(preview)
@@ -421,6 +469,24 @@ def retrieve(uuid):
         else:
             file = None
     return embed, file, view
+
+async def pinCallback(interaction):
+    # await interaction.response.edit_message(content="💖", view=view)
+    logger.info(interaction)
+    with get_database() as client:
+        result = client.database.get_collection("queue").find_one({"uuid": interaction.custom_id})
+        if result:
+            pin = client.database.get_collection("pins").find_one({"uuid": interaction.custom_id, "user" : interaction.user.id})
+            if pin:
+                client.database.get_collection("pins").delete_one({"uuid": interaction.custom_id, "user" : interaction.user.id})
+                await interaction.response.send_message(f"{interaction.user.mention} {interaction.custom_id} unpinned.", delete_after=5)
+            else:
+                client.database.get_collection("pins").insert_one({"uuid": interaction.custom_id, "user" : interaction.user.id})
+                await interaction.response.send_message(f"{interaction.user.mention} {interaction.custom_id} pinned.", delete_after=5)
+        else:
+            await interaction.response.send_message(f"Cannot find {interaction.custom_id} to pin.", delete_after=5)
+        # await interaction.response.send_message(embed=embed, delete_after=60)
+        # await interaction.response.send_message("This will pin something later... -Mike", delete_after=5)
 
 @bot.slash_command(name="modaltest")
 async def modal_slash(ctx):
@@ -521,7 +587,7 @@ async def placeholder(ctx, job_uuid):
     with get_database() as client:
         client.database.get_collection("queue").update_one({"uuid": job_uuid}, {"$set": {"progress_msg": msg.id}})
 
-async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed, symmetry, symmetry_loss_scale, cut_schedule, diffusion_model):
+async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed, symmetry, symmetry_loss_scale, cut_schedule, diffusion_model, eta, cutn_batches, parent_uuid):
     reject = False
     reasons = []
     with get_database() as client:
@@ -544,8 +610,13 @@ async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_gui
             job_uuid = str(uuid.uuid4())
             text_prompt = text_prompt.replace("“", '"')
             text_prompt = text_prompt.replace("”", '"')
+            if set_seed == -1:
+                seed = random.randint(0, 2**32)
+            else:
+                seed = int(set_seed)
             record = {
                 "uuid": job_uuid, 
+                "parent_uuid": parent_uuid,
                 "mode": "userwork",
                 "render_type": render_type,
                 "text_prompt": text_prompt, 
@@ -558,11 +629,13 @@ async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_gui
                 "cut_schedule": cut_schedule,
                 "clip_guidance_scale": clip_guidance_scale,
                 "clamp_max" : clamp_max,
-                "set_seed" : set_seed,
+                "set_seed" : seed,
                 "cut_ic_pow": cut_ic_pow,
+                "cutn_batches": cutn_batches,
                 "sat_scale": sat_scale,
                 "author": int(ctx.author.id),
                 "status": "queued",
+                "eta": eta,
                 "timestamp": datetime.datetime.utcnow()}
             queueCollection = client.database.get_collection("queue")
             queueCollection.insert_one(record)
@@ -575,6 +648,8 @@ async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_gui
                 channel = "sketches"
             if render_type == "render":
                 channel = "images"
+            if render_type == "mutate":
+                channel = "mutations"
 
             channel = discord.utils.get(bot.get_all_channels(), name=channel)
             msg = await channel.send(embed=embed, view=view)
@@ -601,6 +676,12 @@ async def mutate(
     job_uuid: discord.Option(str, "Job UUID to mutate", required=True),
     text_prompt: discord.Option(str, "Enter your text prompt", required=False),
     steps: discord.Option(int, "Number of steps", required=False),
+    cutn_batches: discord.Option(int, "Cut Batches", required=False, default=4, choices=[
+        discord.OptionChoice("2", value=2),
+        discord.OptionChoice("4", value=4),
+        discord.OptionChoice("8", value=8),
+        discord.OptionChoice("16", value=16)
+    ]),
     shape: discord.Option(str, "Image Shape", required=False, choices=[
         discord.OptionChoice("Landscape", value="landscape"),
         discord.OptionChoice("Portrait", value="portrait"),
@@ -611,13 +692,14 @@ async def mutate(
     model: discord.Option(str, "Models", required=False, choices=[
         discord.OptionChoice("Default (ViTB16+32, RN50)", value="default"),
         discord.OptionChoice("ViTB16+32, RN50x64", value="rn50x64"),
-        # discord.OptionChoice("ViTB16+32, ViTL14", value="vitl14"),
+        discord.OptionChoice("ViTB16+32, ViTL14", value="vitl14"),
         discord.OptionChoice("ViTB16+32, ViTL14x336", value="vitl14x336"),
     ]),
     clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False),
     cut_ic_pow: discord.Option(int, "CLIP Innercut Power", required=False),
     sat_scale: discord.Option(int, "Saturation Scale", required=False),
     clamp_max: discord.Option(str, "Clamp Max", required=False),
+    eta: discord.Option(str, "ETA", required=False),
     set_seed: discord.Option(int, "Seed", required=False),
     symmetry: discord.Option(str, "Symmetry", required=False, choices=[
         discord.OptionChoice("No", value="no"),
@@ -643,21 +725,30 @@ async def mutate(
     with get_database() as client:
         result = client.database.get_collection("queue").find_one({"uuid": job_uuid}, {'_id': 0})
     
-    for param in ["text_prompt","steps","shape","model","clip_guidance_scale","cut_ic_pow","sat_scale","clamp_max","set_seed","symmetry","cut_schedule","diffusion_model","symmetry_loss_scale"]:
-        if locals()[param]:
-            value = locals()[param]
-            logger.info(f"Mutating {param} to {value}")
-            result[param] = value
-        else:
-            if param in result:
-                logger.info(f"Keeping {param} as {result[param]}")
+    if result:
+        for param in ["text_prompt","steps","shape","model","clip_guidance_scale","cut_ic_pow","sat_scale","clamp_max","symmetry","cut_schedule","diffusion_model","symmetry_loss_scale","eta","cutn_batches"]:
+            if locals()[param]:
+                value = locals()[param]
+                logger.info(f"Mutating {param} to {value}")
+                result[param] = value
             else:
-                logger.info(f"{param} not present in original job.")
-                result[param] = None
-            
+                if param in result:
+                    logger.info(f"Keeping {param} as {result[param]}")
+                else:
+                    logger.info(f"{param} not present in original job.")
+                    result[param] = None
+        
+        if set_seed == -1:
+            seed = random.randint(0, 2**32)
+        else:
+            seed = result["set_seed"]
+        
+        result["set_seed"] = seed
 
-    await do_render(ctx, "render", result["text_prompt"], result["steps"], result["shape"], result["model"], result["clip_guidance_scale"], 
-        result["cut_ic_pow"], result["sat_scale"], result["clamp_max"], result["set_seed"], result["symmetry"], result["symmetry_loss_scale"], result["cut_schedule"], result["diffusion_model"])
+        await do_render(ctx, "mutate", result["text_prompt"], result["steps"], result["shape"], result["model"], result["clip_guidance_scale"], 
+            result["cut_ic_pow"], result["sat_scale"], result["clamp_max"], seed, result["symmetry"], result["symmetry_loss_scale"], result["cut_schedule"], result["diffusion_model"], result["eta"], result["cutn_batches"], job_uuid)
+    else:
+        await ctx.respond("😭 Hmm, couldn't find that one to mutate.")
 
 
 @bot.command(description="Submit a Disco Diffusion Render Request")
@@ -665,6 +756,12 @@ async def render(
     ctx,
     text_prompt: discord.Option(str, "Enter your text prompt", required=True, default = "A beautiful painting of a singular lighthouse, shining its light across a tumultuous sea of blood by greg rutkowski and thomas kinkade, Trending on artstation."),
     steps: discord.Option(int, "Number of steps", required=False, default=150),
+    cutn_batches: discord.Option(int, "Cut Batches", required=False, default=4, choices=[
+        discord.OptionChoice("2", value=2),
+        discord.OptionChoice("4", value=4),
+        discord.OptionChoice("8", value=8),
+        discord.OptionChoice("16", value=16)
+    ]),
     shape: discord.Option(str, "Image Shape", required=False, default="landscape", choices=[
         discord.OptionChoice("Landscape", value="landscape"),
         discord.OptionChoice("Portrait", value="portrait"),
@@ -675,13 +772,14 @@ async def render(
     model: discord.Option(str, "Models", required=False, default="default", choices=[
         discord.OptionChoice("Default (ViTB16+32, RN50)", value="default"),
         discord.OptionChoice("ViTB16+32, RN50x64", value="rn50x64"),
-        # discord.OptionChoice("ViTB16+32, ViTL14", value="vitl14"),
+        discord.OptionChoice("ViTB16+32, ViTL14", value="vitl14"),
         discord.OptionChoice("ViTB16+32, ViTL14x336", value="vitl14x336"),
     ]),
     clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False, default=5000),
     cut_ic_pow: discord.Option(int, "CLIP Innercut Power", required=False, default=1),
     sat_scale: discord.Option(int, "Saturation Scale", required=False, default=0),
     clamp_max: discord.Option(str, "Clamp Max", required=False, default="0.05"),
+    eta: discord.Option(str, "ETA", required=False, default="0.8"),
     set_seed: discord.Option(int, "Seed", required=False, default=-1),
     symmetry: discord.Option(str, "Symmetry", required=False, default="no", choices=[
         discord.OptionChoice("No", value="no"),
@@ -704,7 +802,7 @@ async def render(
     ]),
     symmetry_loss_scale: discord.Option(int, "Symmetry Loss Scale", required=False, default=1500),
 ):
-    await do_render(ctx, "render", text_prompt, steps, shape, model, clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed, symmetry, symmetry_loss_scale, cut_schedule, diffusion_model)
+    await do_render(ctx, "render", text_prompt, steps, shape, model, clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed, symmetry, symmetry_loss_scale, cut_schedule, diffusion_model, eta, cutn_batches, None)
 
 @bot.command(description="Submit a Disco Diffusion Sketch Request (will jump queue)")
 async def sketch(
@@ -721,7 +819,12 @@ async def sketch(
     cut_ic_pow: discord.Option(int, "CLIP Innercut Power", required=False, default=1),
     sat_scale: discord.Option(int, "Saturation Scale", required=False, default=0),
     clamp_max: discord.Option(str, "Clamp Max", required=False, default="0.05"),
+    eta: discord.Option(str, "ETA", required=False, default="0.8"),
     set_seed: discord.Option(int, "Seed", required=False, default=-1),
+    cutn_batches: discord.Option(int, "Cut Batches", required=False, default=2, choices=[
+        discord.OptionChoice("2", value=2),
+        discord.OptionChoice("4", value=4),
+    ]),
     steps: discord.Option(str, "Diffusion Model", required=False, default=50, choices=[
         discord.OptionChoice("50", value="50"),
         discord.OptionChoice("100", value="100"),
@@ -746,7 +849,7 @@ async def sketch(
         discord.OptionChoice("lsun_uncond_100M_1200K_bs128", value="lsun_uncond_100M_1200K_bs128")
     ]),
 ):
-    await do_render(ctx, "sketch", text_prompt, int(steps), shape, "default", clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed, symmetry, symmetry_loss_scale, cut_schedule, diffusion_model)
+    await do_render(ctx, "sketch", text_prompt, int(steps), shape, "default", clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed, symmetry, symmetry_loss_scale, cut_schedule, diffusion_model, eta, cutn_batches, None)
 
 # @bot.command(description="Nuke Render Queue (debug)")
 # async def nuke(ctx):
@@ -756,6 +859,7 @@ async def sketch(
 
 
 @bot.command(description="Remove a render request (intended for admins)")
+@discord.ext.commands.has_any_role('admin')
 async def destroy(ctx, uuid):
     with get_database() as client:
         result = client.database.get_collection("queue").find_one({"uuid": uuid})
@@ -818,7 +922,7 @@ async def sudo_retry(ctx, uuid):
             await ctx.respond(f"💼 Job marked for retry.")
 
 @bot.command(description="Repeat a render request")
-async def repeat(ctx, job_uuid):
+async def repeat(ctx, job_uuid, set_seed: discord.Option(int, "Seed", required=False, default=-1)):
     with get_database() as client:
         result = client.database.get_collection("queue").find_one({"uuid": job_uuid}, {'_id': 0})
         new_uuid = str(uuid.uuid4())
@@ -835,6 +939,12 @@ async def repeat(ctx, job_uuid):
             render_type = result["render_type"]
         except:
             render_type = "render"
+        if set_seed == -1:
+            seed = random.randint(0, 2**32)
+        else:
+            seed = int(set_seed)
+        result["set_seed"] = seed
+
         result = client.database.get_collection("queue").insert_one(result)
         insertID = result
         botspam_channels = ["botspam"]
@@ -857,6 +967,10 @@ async def repeat(ctx, job_uuid):
                 channel = "sketches"
             if render_type == "render":
                 channel = "images"
+            if render_type == "repeat":
+                channel = "images"
+            if render_type == "mutate":
+                channel = "mutations"
                 
             embed, file, view = retrieve(new_uuid)
             channel = discord.utils.get(bot.get_all_channels(), name=channel)
@@ -927,10 +1041,12 @@ async def rejects(ctx):
 
 @bot.command(description="View next 10 render queue entries")
 async def queue(ctx):
+    await ctx.respond("Command Accepted.",delete_after=3)
     await query_queue(ctx, who = "all", status = "all")
 
 @bot.command(description="View active queue entries")
 async def active(ctx):
+    await ctx.respond("Command Accepted.",delete_after=3)
     await query_queue(ctx, who = "all", status = "processing")
 
 
@@ -970,37 +1086,41 @@ async def query_queue(ctx, who, status):
                 """
                 embed.add_field(name=job.get("uuid"), value=summary, inline=False)
             await channel.send(embed=embed)
-        await ctx.respond("Command Accepted.",delete_after=3)
 
 @bot.command(description="View your history")
 async def myhistory(ctx):
+    await ctx.respond("Command Accepted.",delete_after=3)
     await query_queue(ctx, who = "me", status = "all")
 
 
 async def agent_status(channel, messageid):
     channel = bot.get_channel(channel)  
-    table = Texttable(120)
+    table = Texttable(160)
     table.set_deco(Texttable.HEADER)
     # 't',  # text
     # 'f',  # float (decimal)
     # 'e',  # float (exponent)
     # 'i',  # integer
     # 'a'
-    table.set_cols_dtype(['a','a','a','a','a']) # automatic
+    table.set_cols_dtype(['a','a','a','a','a','a']) # automatic
     # table.set_cols_align(["l", "r", "r", "r", "l"])
     data = []
-    data.append(["Agent", "Last Seen", "Score", "Mode", "GPU Stats"])
+    data.append(["Agent", "Last Seen", "Score", "Mode", "Model Config", "GPU Stats"])
     # await ctx.respond(f"""```\n{t}\n```""")
     with get_database() as client:
         # query = {"$query": q, "$orderby": {"timestamp": -1}}
         # queue = client.database.get_collection("queue").find(query).limit(10)
-        agents = client.database.get_collection("agents").find().sort("last_seen",-1)
+        since = datetime.datetime.now() - datetime.timedelta(minutes=10)
+        agents = client.database.get_collection("agents").find({"last_seen":{"$gt":since}}).sort("last_seen",-1)
+        
+        
+        # mydb.mytable.find({"date": {"$lt": datetime.datetime(2015, 12, 1)}}).sort("author")
         
         for a, agent in enumerate(agents):
             gpustats = agent.get('gpustats')
             if gpustats:
                 gpustats = str(gpustats).replace("\n","")
-            data.append([agent.get("agent_id"),agent.get('last_seen'),agent.get('score'),agent.get('mode'),gpustats])
+            data.append([agent.get("agent_id"),agent.get('last_seen').strftime("%Y-%m-%d %H:%M:%S"),agent.get('score'),agent.get('mode'),agent.get('model_mode'),gpustats])
            
         table.add_rows(data)
         t = table.draw()
