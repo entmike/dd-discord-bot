@@ -13,4 +13,5 @@ dnspython
 waitress
 texttable
 jsbeautifier
+requests
 # git+https://github.com/dimitrismistriotis/profanity-check

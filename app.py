@@ -67,6 +67,55 @@ def pulse(agent_id):
         agentCollection.update_one({"agent_id": agent_id},
         {"$set": {"last_seen": datetime.now()}})
 
+@app.route("/queue/", methods=["GET"], defaults={'status': 'all'})
+@app.route("/queue/<status>/")
+def queue(status):
+    logger.info(f"Queue request for status {status}...")
+    q = {"status": {"$nin": ["archived","rejected"]}}
+    # if who == "me":
+    #     q["author"] = int(author)
+    if status != "all":
+        q["status"] = status
+    # if status == "all" and who=="me":
+    #     del q["status"]
+    with get_database() as client:
+        query = {"$query": q, "$orderby": {"timestamp": -1}}
+        queue = client.database.get_collection("queue").find(query)
+        return dumps(queue)
+
+@app.route("/events/", methods=["GET"], defaults={'status': 'new'})
+@app.route("/events/<status>/")
+def events(status):
+    q = {"ack": False}
+    if status == "new":
+        q = {"ack": False}
+    query = {"$query": q, "$orderby": {"timestamp": 1}}
+    with get_database() as client:
+        events = client.database.get_collection("events").find(query)
+        return dumps(events)
+
+@app.route("/ack_event/<uuid>/")
+def ack_event(uuid):
+    logger.info(f"Acknowledging event '{uuid}'")
+    with get_database() as client:
+        result = client.database.get_collection("events").delete_one({"uuid" :uuid})
+        logger.info(f"Deleted {uuid} ({result.deleted_count})")
+        return dumps({"deleted_count": result.deleted_count})
+
+@app.route("/updatejob/<uuid>/", methods=["POST"])
+def updatejob(uuid):
+    logger.info(f"Updating job '{uuid}'")
+    vals = request.form
+    newvals = {}
+    for val in vals:
+        newvals[val] = vals[val]
+        if val == "last_preview":
+            newvals[val] = datetime.strptime(vals[val],'%Y-%m-%d %H:%M:%S.%f')
+    with get_database() as client:
+        result = client.database.get_collection("queue").update_one({"uuid" :uuid},{"$set":newvals})
+        logger.info(f"Updated {uuid} ({result.matched_count})")
+        return dumps({"matched_count": result.matched_count})
+
 @app.route("/query/<job_uuid>", methods=["GET"])
 def query(job_uuid):
     with get_database() as client:
@@ -417,7 +466,9 @@ def dream(agent_id):
     import dd_prompt_salad
     job_uuid = uuid.uuid4()
     templates = [
-        "beautiful {progrock/style} {progrock/genre} painting of a beatiful scenic mountain range surrounded by {adjectives} {colors} {shapes}s, by {artists} and {artists} and {artists} and {artists}"
+        # "beautiful {progrock/style} {progrock/genre} painting of a beatiful scenic forest range surrounded by {adjectives} {colors} {shapes}s, by {artists}"
+        # "intricately detailed hand carved 3D mandelbulb skull made of brilliantly colored volumetric smoke, {artists}, Artstation, Pinterest, Wallpaper 4K"
+        "a scenic beach during a colorful sunset, beautiful glistening palm trees overhanging the shoreline, seagulls flying above, {artists}, Artstation, Pinterest, Wallpaper 4K"
         # # "Ellen Jewett, beautiful surreal palatial {things} at dawn, gustave dore, ferdinand knab, {artists}",
         # "a beautifully ultradetailed painting of a mysterious {colors} {locations} on top of a {locations} on the side of a mountain filled with giant orange and purple crystals illuminated by pastel pink fireflies, icy blue mist, morning shot, Alena Aenami, Raphael Lacoste, Makoto Shinkai, 4k, trending on artstation",
         # # "multiple colorful globes full of {things}s swirling around a hellscape, crystals illuminating the night sky",

@@ -1,4 +1,5 @@
 import random
+import requests
 import traceback
 import datetime
 from random import choices
@@ -28,57 +29,62 @@ load_dotenv()
 
 agents = []
 ticks = 0
+BOT_API = os.getenv('BOT_API')
+
+def lazy(obj, field):
+    if obj.has_key(field):
+        return obj[field]
+    else:
+        return None
+
 
 async def queueBroadcast(who, status, author=None, channel = None, messageid=None, label="queue"):
-    channel_id = 979027153029070918
     channel = bot.get_channel(channel)
-    with get_database() as client:
-        q = {"status": {"$nin": ["archived","rejected"]}}
-        if who == "me":
-            q ["author"] = int(author)
-        if status != "all":
-            q["status"] = status
-        if status == "all" and who=="me":
-            del q["status"]
+    # Get data from API
+    api = f"{BOT_API}/queue/{status}"
+    logger.info(f"🌍 Getting queue from '{api}'...")
+    queue = requests.get(api).json()
+    color = discord.Colour.blurple()
+    if status == "processing":
+        color = discord.Colour.green()
 
-        query = {"$query": q, "$orderby": {"timestamp": -1}}
-        count = client.database.get_collection("queue").count_documents(q)
-        name = f"{label}︱{count}"
-        logger.info(f"Renaming Channel to {name}")
-        # await channel.edit(name = name)
-        logger.info("Channel Renamed")
-        queue = client.database.get_collection("queue").find(query).limit(10)
-        color = discord.Colour.blurple()
-        if status == "processing":
-            color = discord.Colour.green()
-
-        embed = discord.Embed(
-            title="Request Queue",
-            description=f"The following requests are {status}",
-            color=color,  # Pycord provides a class with default colors you can choose from
-        )
-        for j, job in enumerate(queue):
-            user = await bot.fetch_user(job.get("author"))
-            summary = f"""
-            - 🧑‍🦲 Author: <@{job.get('author')}>
-            - ✍️ Text Prompt: `{job.get('text_prompt')[0:100]}...`
-            - Mode: `{job.get('mode')}`
-            - Status: `{job.get('status')}`
-            - Progress: `{job.get('percent')}%`
-            - Timestamp: `{job.get('timestamp')}`
-            - Agent: `{job.get('agent_id')}`
-            """
-            msgid = job.get("progress_msg")
-            if msgid:
-                link = f"[{job.get('uuid')}](https://discord.com/channels/945459234194219029/{channel_id}/{msgid}) (<@{job.get('author')}>)\nProgress: `{job.get('percent')}%` | Agent: `{job.get('agent_id')}`"
-                embed.add_field(name=f"🎨 {job.get('uuid')}", value=link, inline=False)
+    embed = discord.Embed(
+        title="Request Queue",
+        description=f"The following requests are {status}",
+        color=color,  # Pycord provides a class with default colors you can choose from
+    )
+    for j, job in enumerate(queue):
+        user = await bot.fetch_user(job.get("author"))
+        summary = f"""
+        - 🧑‍🦲 Author: <@{job.get('author')}>
+        - ✍️ Text Prompt: `{job.get('text_prompt')[0:100]}...`
+        - Mode: `{job.get('mode')}`
+        - Status: `{job.get('status')}`
+        - Progress: `{job.get('percent')}%`
+        - Timestamp: `{job.get('timestamp')}`
+        - Agent: `{job.get('agent_id')}`
+        """
+        msgid = job.get("progress_msg")
+        details = f"[Job]({BOT_API}/job/{job.get('uuid')})"
+        summary = f"<@{job.get('author')}> | `{job.get('percent')}%` | `{job.get('agent_id')}` | {details}"
+        if msgid:
+            if job.get("channel_id"):
+                channel_id = job.get("channel_id")
             else:
-                embed.add_field(name=f"🎨 {job.get('uuid')}", value=f"{job.get('uuid')} (<@{job.get('author')}>)\nProgress: `{job.get('percent')}%`", inline=False)
-        if messageid != None:
-            message = await channel.fetch_message(messageid)
-            await message.edit(embed = embed)
-        else:
-            await channel.send(embed = embed)
+                # bw compatibility
+                if job.get("render_type") == "render" or job.get("render_type") == "repeat":
+                    channel_id = 979027153029070918
+                if job.get("render_type") == "mutate":
+                    channel_id = 984590762354298890
+                if job.get("render_type") == "sketch":
+                    channel_id = 981398961246052393
+            summary =f"{summary} | [Image](https://discord.com/channels/945459234194219029/{channel_id}/{msgid})"
+        embed.add_field(name=f"🎨 {job.get('uuid')}", value=summary, inline=False)
+    if messageid != None:
+        message = await channel.fetch_message(messageid)
+        await message.edit(embed = embed)
+    else:
+        await channel.send(embed = embed)
 
 
 # this code will be executed every 10 seconds after the bot is ready
@@ -86,8 +92,6 @@ async def queueBroadcast(who, status, author=None, channel = None, messageid=Non
 async def task_loop():
     global ticks
     ticks += 1
-    image_channels = ["images-discussion", "images"]
-    dream_channels = ["day-dreams"]
     botspam_channels = ["botspam"]
     logger.info("loop")
     with get_database() as client:
@@ -102,8 +106,10 @@ async def task_loop():
         await queueBroadcast("all", "queued", None, 981250961534255186, 981582971477848084, "waiting")
         # Process any Events
         logger.info("checking events")
-        eventCollection = client.database.get_collection("events")
-        events = eventCollection.find({"$query": {"ack": {"$eq": False}}})
+        api = f"{BOT_API}/events"
+        logger.info(f"🌍 Getting events from '{api}'...")
+        events = requests.get(api).json()
+        logger.info(f"Processing {len(events)} events...")
         for event in events:
             # logger.info("event")
             title = "Message"
@@ -116,26 +122,43 @@ async def task_loop():
             #     channel = discord.utils.get(bot.get_all_channels(), name=channel)
                 # await channel.send(embed=embed)
             event_type = event.get("event")["type"]
-            if event_type == "progress":
+            # logger.info(event_type)
+            if event_type == "progress" or event_type == "preview":
                 job_uuid = event.get("event")["job_uuid"]
                 embed, file, view = retrieve(job_uuid)
                 if embed:
                     # logger.info(f"Progress Update found for {job_uuid}")
-                    jobCollection = client.database.get_collection("queue")
-                    job = jobCollection.find_one({"$query": {"uuid": job_uuid}})
-                    last_preview = job.get("last_preview")
+                    api = f"{BOT_API}/job/{job_uuid}"
+                    # logger.info(f"🌍 Getting job from '{api}'...")
+                    job = requests.get(api).json()
+                    if job.get("last_preview"):
+                        # logger.info(type(job.get("last_preview")))
+                        if(type(job.get("last_preview")) is str):
+                            strdate = job.get("last_preview")
+                            last_preview = datetime.datetime.strptime(strdate,'%Y-%m-%d %H:%M:%S.%f')
+                        else:
+                            strdate = job.get("last_preview")["$date"]
+                            try:
+                                last_preview = datetime.datetime.strptime(strdate,'%Y-%m-%dT%H:%M:%S.%fZ')
+                            except:
+                                last_preview = datetime.datetime.strptime(strdate,'%Y-%m-%dT%H:%M:%SZ')
+                    else:
+                        last_preview = None
+                    # last_preview = datetime.datetime(job.get("last_preview")["$date"])
                     toosoon = False
                     if last_preview == None:
                         toosoon = False
                     else:
                         n = datetime.datetime.now()
                         duration = n - last_preview
+                        # logger.info(duration)
                         if duration.total_seconds() < 20:
-                            logger.info(duration)
                             toosoon = True
                     if job:
                         if job.get("progress_msg") and job.get('status') == 'processing' and toosoon == False:
+                            logger.info(f"⬆️ Updating progress in discord for {job.get('uuid')}")
                             render_type = job.get('render_type')
+                            mode = job.get('mode')
                             if render_type is None:
                                 render_type = "render"
 
@@ -145,6 +168,8 @@ async def task_loop():
                                 channel = "images"
                             if render_type == "mutate":
                                 channel = "mutations"
+                            if mode == "dream":
+                                channel = "day-dreams"
                             channel = discord.utils.get(bot.get_all_channels(), name=channel)
                             # logger.info(f"Updating message {job.get('progress_msg')}...")
                             try:
@@ -156,12 +181,14 @@ async def task_loop():
                             except:
                                 pass
                                 # logger.error(f"Could not update message {job.get('progress_msg')}")
-                            jobCollection.update_one({"uuid": job_uuid},{"$set": {"last_preview": datetime.datetime.now()}})
-                        # else:
-                            # logger.info(f"Progress update received but no message to update {job_uuid}")
+                            api = f"{BOT_API}/updatejob/{job_uuid}/"
+                            logger.info(f"🌍 Updating Job '{api}'...")
+                            requests.post(api, data={"last_preview": datetime.datetime.now()}).json()
             
-                d = eventCollection.delete_one({"uuid": event.get("uuid")})
-                # logger.info(f"Deleted {d.deleted_count} processed event(s).")
+                api = f"{BOT_API}/ack_event/{event.get('uuid')}"
+                # logger.info(f"🌍 Ack event '{event.get('uuid')}'...")
+                requests.get(api).json()
+                # logger.info(f"Deleted {d} processed event(s).")
             # eventCollection.update_one({"uuid": event.get("uuid")}, {"$set": {"ack": True}})
         
         # Display any new messages
@@ -198,6 +225,7 @@ async def task_loop():
                 logger.info(f"Found completed job: Mode: {completedJob.get('mode')}")
                 
                 render_type = completedJob.get('render_type')
+                mode = completedJob.get('mode')
                 if render_type is None:
                     render_type = "render"
 
@@ -207,12 +235,9 @@ async def task_loop():
                     channel = "images"
                 if render_type == "mutate":
                     channel = "mutations"
-
-                if completedJob.get("mode") != "dream":
-                    channels = ["images-discussion", channel]
-                else:
-                    channels = dream_channels
-                
+                if mode == "dream":
+                    channel = "day-dreams"
+                channels = ["images-discussion", channel]
 
                 for channel in channels:
                     channel = discord.utils.get(bot.get_all_channels(), name=channel)
@@ -263,8 +288,31 @@ async def task_loop():
                     embed.add_field(name="Log", value=f"```{log}```", inline=False)
                 # embed, file, view = retrieve(completedJob.get('uuid'))
                 await channel.send(embed=embed)
-            queueCollection.update_one({"uuid": completedJob.get("uuid")}, {"$set": {"status": "rejected"}})
-
+            rejectedCount = completedJob.get("reject_count")
+            if rejectedCount:
+                rejectedCount+=1
+            else:
+                rejectedCount = 0
+            queueCollection.update_one({"uuid": completedJob.get("uuid")}, {"$set": {"status": "rejected", "rejectedCount" : rejectedCount}})
+        
+        # Drop any stalled jobs
+        
+        logger.info("checking stalled jobs")
+        since = datetime.datetime.now() - datetime.timedelta(minutes=10)
+        query = {"status": "processing", "last_preview" : {"$lt":since}}
+        queueCollection = client.database.get_collection("queue")
+        stalls = queueCollection.find(query)
+        for stall in stalls:
+            for channel in botspam_channels:
+                channel = discord.utils.get(bot.get_all_channels(), name=channel)
+                embed = discord.Embed(
+                    title="😠 Job Stalled 😠",
+                    description=f"Job `{stall.get('uuid')}` from <@{stall.get('author')}> was apparently abandoned by `{stall.get('agent_id')}`  Reassigning in queue.",
+                    color=discord.Colour.orange(),
+                )
+                await channel.send(embed=embed)
+            queueCollection.update_one({"uuid": stall.get("uuid")}, {"$set": {"status": "queued", "agent_id" : None, "percent" : None, "last_preview" : None}})
+    logger.info("end loop")
 bot = discord.Bot(debug_guilds=[945459234194219029])  # specify the guild IDs in debug_guilds
 arr = []
 agents = []
@@ -333,7 +381,7 @@ async def do_refresh(job_uuid):
 
 @bot.slash_command(name="refresh_all", description="Refresh all images (temporary utility command)")
 async def refresh_all(ctx):
-    await ctx.respond("Acknowledged.", delete_after=0)
+    await ctx.respond("Acknowledged.", ephemeral=True)
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
         jobs = queueCollection.find({})
@@ -351,7 +399,7 @@ async def refresh_all(ctx):
 
 @bot.slash_command(name="refresh", description="Refresh an image (temporary utility command)")
 async def refresh(ctx, job_uuid):
-    await ctx.respond("Acknowledged.", delete_after=0)
+    await ctx.respond("Acknowledged.", ephemeral=True)
     await do_refresh(job_uuid)
 
 @bot.slash_command(name="display")
@@ -415,7 +463,7 @@ def retrieve(uuid):
         if status == "queued":
             color = discord.Colour.blurple()
         # logger.info(f"{uuid} - {status}")
-        details = f"[Job](https://api.feverdreams.app/job/{completedJob.get('uuid')}) | [Config](https://api.feverdreams.app/config/{completedJob.get('uuid')})"
+        details = f"[Job]({BOT_API}/job/{completedJob.get('uuid')}) | [Config]({BOT_API}/config/{completedJob.get('uuid')})"
         if completedJob.get("parent_uuid"):
             details = f"{details} | Parent: `{completedJob.get('parent_uuid')}`"
         embed = discord.Embed(
@@ -479,12 +527,13 @@ async def pinCallback(interaction):
             pin = client.database.get_collection("pins").find_one({"uuid": interaction.custom_id, "user" : interaction.user.id})
             if pin:
                 client.database.get_collection("pins").delete_one({"uuid": interaction.custom_id, "user" : interaction.user.id})
-                await interaction.response.send_message(f"{interaction.user.mention} {interaction.custom_id} unpinned.", delete_after=5)
+                await interaction.response.send_message(f"{interaction.user.mention} {interaction.custom_id} unpinned.", ephemeral=True)
             else:
                 client.database.get_collection("pins").insert_one({"uuid": interaction.custom_id, "user" : interaction.user.id})
-                await interaction.response.send_message(f"{interaction.user.mention} {interaction.custom_id} pinned.", delete_after=5)
+                await interaction.response.send_message(f"{interaction.user.mention} {interaction.custom_id} pinned.", ephemeral=True)
         else:
-            await interaction.response.send_message(f"Cannot find {interaction.custom_id} to pin.", delete_after=5)
+            
+            await interaction.response.send_message(f"Cannot find {interaction.custom_id} to pin.", ephemeral=True)
         # await interaction.response.send_message(embed=embed, delete_after=60)
         # await interaction.response.send_message("This will pin something later... -Mike", delete_after=5)
 
@@ -665,10 +714,10 @@ async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_gui
             #         color=discord.Colour.blurple(),
             #     )
             #     msg = await channel.send(embed=embed)
-            await ctx.respond("Command Accepted.",delete_after=3)
+            await ctx.respond("Command Accepted.", ephemeral=True)
 
     else:
-        await ctx.respond("\n".join(reasons))
+        await ctx.respond("\n".join(reasons), ephemeral=True)
 
 @bot.command(description="Mutate a Disco Diffusion Render")
 async def mutate(
@@ -923,66 +972,11 @@ async def sudo_retry(ctx, uuid):
 
 @bot.command(description="Repeat a render request")
 async def repeat(ctx, job_uuid, set_seed: discord.Option(int, "Seed", required=False, default=-1)):
-    with get_database() as client:
-        result = client.database.get_collection("queue").find_one({"uuid": job_uuid}, {'_id': 0})
-        new_uuid = str(uuid.uuid4())
-        result["uuid"] = new_uuid
-        result["status"] = 'queued'
-        result["timestamp"] = datetime.datetime.utcnow()
-        result["author"] = int(ctx.author.id)
-        result["percent"] = 0
-        result["preview"] = False
-        result["progress_msg"] = None
-        result["duration"] = 0
-        result["mode"] = 'repeat'
-        try:
-            render_type = result["render_type"]
-        except:
-            render_type = "render"
-        if set_seed == -1:
-            seed = random.randint(0, 2**32)
-        else:
-            seed = int(set_seed)
-        result["set_seed"] = seed
-
-        result = client.database.get_collection("queue").insert_one(result)
-        insertID = result
-        botspam_channels = ["botspam"]
-        if not insertID:
-            for channel in botspam_channels:
-                channel = discord.utils.get(bot.get_all_channels(), name=channel)
-                embed = discord.Embed(
-                    title="Error",
-                    description=f"❌ <@{ctx.author.id}> Cannot repeat `{job_uuid}`",
-                    color=discord.Colour.blurple(),
-                )
-                await channel.send(embed=embed)
-                await ctx.respond("Command Accepted.",delete_after=3)
-        else:
-            
-            if render_type is None:
-                render_type = "render"
-
-            if render_type == "sketch":
-                channel = "sketches"
-            if render_type == "render":
-                channel = "images"
-            if render_type == "repeat":
-                channel = "images"
-            if render_type == "mutate":
-                channel = "mutations"
-                
-            embed, file, view = retrieve(new_uuid)
-            channel = discord.utils.get(bot.get_all_channels(), name=channel)
-            msg = await channel.send(embed=embed, view=view)
-            with get_database() as client:
-                client.database.get_collection("queue").update_one({"uuid": new_uuid}, {"$set": {"progress_msg": msg.id}})
-
-            await ctx.respond("Command Accepted.",delete_after=3)
+    await ctx.respond("Repeat is obsolete.  Please use `/mutate`.",ephemeral=True)
 
 @bot.command(description="Get details of a render request")
 async def query(ctx, uuid):
-    await ctx.respond(f"https://api.feverdreams.app/query/{uuid}")
+    await ctx.respond(f"{BOT_API}/query/{uuid}")
     # with get_database() as client:
         # result = client.database.get_collection("queue").find_one({"uuid": uuid})
         # await ctx.respond(f"""```
@@ -1036,18 +1030,18 @@ async def rejects(ctx):
                 """
                 embed.add_field(name=job.get("uuid"), value=summary, inline=False)
             await channel.send(embed=embed)
-        await ctx.respond("Command Accepted.",delete_after=3)
+        await ctx.respond("Command Accepted.", ephemeral=True)
 
 
-@bot.command(description="View next 10 render queue entries")
-async def queue(ctx):
-    await ctx.respond("Command Accepted.",delete_after=3)
-    await query_queue(ctx, who = "all", status = "all")
+# @bot.command(description="View next 10 render queue entries")
+# async def queue(ctx):
+#     await ctx.respond("Command Accepted.",delete_after=3)
+#     await query_queue(ctx, who = "all", status = "all")
 
-@bot.command(description="View active queue entries")
-async def active(ctx):
-    await ctx.respond("Command Accepted.",delete_after=3)
-    await query_queue(ctx, who = "all", status = "processing")
+# @bot.command(description="View active queue entries")
+# async def active(ctx):
+#     await ctx.respond("Command Accepted.",delete_after=3)
+#     await query_queue(ctx, who = "all", status = "processing")
 
 
 async def query_queue(ctx, who, status):
@@ -1089,7 +1083,7 @@ async def query_queue(ctx, who, status):
 
 @bot.command(description="View your history")
 async def myhistory(ctx):
-    await ctx.respond("Command Accepted.",delete_after=3)
+    await ctx.respond("Command Accepted.", ephemeral=True)
     await query_queue(ctx, who = "me", status = "all")
 
 
