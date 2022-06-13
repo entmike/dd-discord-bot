@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from yaml import dump, full_load
 from werkzeug.utils import secure_filename
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from bson import Binary, Code
 from bson.json_util import dumps
 import uuid
@@ -17,10 +17,11 @@ from loguru import logger
 sys.path.append(".")
 from db import get_database
 
-# load_dotenv()
+load_dotenv()
 
 UPLOAD_FOLDER = "images"
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "log"}
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 
 app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
@@ -40,6 +41,20 @@ def event(event):
         eventTable = client.database.get_collection("events")
         eventTable.insert_one({"timestamp": datetime.now(), "ack": False, "uuid": str(uuid.uuid4()), "event" : event})
     # logger.info(f"Event logged: {event}")
+
+@app.route("/toggle_pin/<user_id>/<uuid>/")
+def toggle_pin(user_id, uuid):
+    if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
+        return jsonify({"message": "ERROR: Unauthorized"}), 401
+    logger.info("pin")
+    with get_database() as client:
+        pin = client.database.get_collection("pins").find_one({"uuid": uuid, "user" : user_id})
+        if pin:
+            client.database.get_collection("pins").delete_one({"uuid": uuid, "user" : user_id})
+            return dumps({"message":"Unpinned"})
+        else:
+            client.database.get_collection("pins").insert_one({"uuid": uuid, "user" : user_id})
+            return dumps({"message":"Pinned"})
 
 @app.route("/register/<agent_id>")
 def register(agent_id):
@@ -71,7 +86,11 @@ def pulse(agent_id):
 @app.route("/queue/<status>/")
 def queue(status):
     logger.info(f"Queue request for status {status}...")
-    q = {"status": {"$nin": ["archived","rejected"]}}
+    if status == "stalled":
+        since = datetime.now() - timedelta(minutes=10)
+        q = {"status": "processing", "last_preview" : {"$lt":since}}
+    else:
+        q = {"status": {"$nin": ["archived","rejected"]}}
     # if who == "me":
     #     q["author"] = int(author)
     if status != "all":
@@ -86,6 +105,8 @@ def queue(status):
 @app.route("/events/", methods=["GET"], defaults={'status': 'new'})
 @app.route("/events/<status>/")
 def events(status):
+    if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
+        return jsonify({"message": "ERROR: Unauthorized"}), 401
     q = {"ack": False}
     if status == "new":
         q = {"ack": False}
@@ -94,6 +115,15 @@ def events(status):
         events = client.database.get_collection("events").find(query)
         return dumps(events)
 
+@app.route("/logs/")
+def logs():
+    q = {"ack": False}
+    query = {"$query": q, "$orderby": {"timestamp": 1}}
+    with get_database() as client:
+        logs = client.database.get_collection("logs").find(query)
+        return dumps(logs)
+
+
 @app.route("/ack_event/<uuid>/")
 def ack_event(uuid):
     logger.info(f"Acknowledging event '{uuid}'")
@@ -101,6 +131,14 @@ def ack_event(uuid):
         result = client.database.get_collection("events").delete_one({"uuid" :uuid})
         logger.info(f"Deleted {uuid} ({result.deleted_count})")
         return dumps({"deleted_count": result.deleted_count})
+
+@app.route("/ack_log/<uuid>/")
+def ack_log(uuid):
+    logger.info(f"Acknowledging log '{uuid}'")
+    with get_database() as client:
+        result = client.database.get_collection("logs").update_one({"uuid": uuid}, {"$set": {"ack": True}})
+        logger.info(f"Acknowledged {uuid} ({result.modified_count})")
+        return dumps({"modified_count": result.modified_count})
 
 @app.route("/updatejob/<uuid>/", methods=["POST"])
 def updatejob(uuid):
@@ -143,12 +181,71 @@ def myhistory(author_id, status):
         jobs = queueCollection.find(q)
         return jsonify(json.loads(dumps(jobs)))
 
-@app.route("/job/<job_uuid>", methods=["GET"])
+@app.route("/job/<job_uuid>", methods=["GET","DELETE"])
 def job(job_uuid):
+    if request.method == "GET":
+        with get_database() as client:
+            queueCollection = client.database.get_collection("queue")
+            job = queueCollection.find_one({"uuid" : job_uuid})
+            return dumps(job)
+    if request.method == "DELETE":
+        if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
+            return jsonify({"message": "ERROR: Unauthorized"}), 401
+        with get_database() as client:
+            queueCollection = client.database.get_collection("queue")
+            d = queueCollection.delete_many({"uuid" : job_uuid})
+            return dumps({"deleted_count": d.deleted_count})
+
+@app.route("/duplicate/<job_uuid>", methods=["GET"])
+def duplicate(job_uuid):
+    if request.method == "GET":
+        with get_database() as client:
+            queueCollection = client.database.get_collection("queue")
+            job = queueCollection.find_one({"uuid" : job_uuid}, {'_id': 0})
+            return dumps(job)
+
+@app.route("/agentstats")
+def agentstats():
+    with get_database() as client:
+        since = datetime.now() - timedelta(minutes=10)
+        agents = client.database.get_collection("agents").find({"last_seen":{"$gt":since}}).sort("last_seen",-1)
+        return dumps(agents)
+
+
+@app.route("/queuestats")
+def queuestats():
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
-        job = queueCollection.find_one({"uuid" : job_uuid})
-        return dumps(job)
+        queuedCount = queueCollection.count_documents({"status": "queued"})
+        processingCount = queueCollection.count_documents({"status": "processing"})
+        renderedCount = queueCollection.count_documents({"status": "archived"})
+        rejectedCount = queueCollection.count_documents({"status": "rejected"})
+        return dumps({
+            "queuedCount" : queuedCount,
+            "processingCount" : processingCount,
+            "renderedCount" : renderedCount,
+            "rejectedCount" : rejectedCount
+        })
+
+@app.route("/cancel/<job_uuid>", methods=["DELETE"])
+def cancel(job_uuid):
+    if request.method == "DELETE":
+        if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
+            return jsonify({"message": "ERROR: Unauthorized"}), 401
+        
+        with get_database() as client:
+            q = {
+                "author": request.form.get("requestor", type = int),
+                "uuid": job_uuid,
+                "status": "queued"}
+            logger.info(q)
+            result = client.database.get_collection("queue").delete_many(q)
+            count = result.deleted_count
+
+        if count == 0:
+            return dumps({"message":f"❌ Could not delete job `{job_uuid}`.  Check the Job ID and if you are the owner, and that your job has not started running yet."})
+        else:
+            return dumps({"message":f"🗑️ Job `{job_uuid}` removed."})
 
 @app.route("/config/<job_uuid>", methods=["GET"])
 def config(job_uuid):
@@ -396,6 +493,39 @@ def clearevents():
             logCollection.drop()
     return "dropped events"
 
+@app.route("/placeorder", methods = ["POST"])
+def placeorder():
+    if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
+        return jsonify({"message": "ERROR: Unauthorized"}), 401
+    newrecord = {
+        "uuid" : request.form.get("uuid", type=str),
+        "parent_uuid" : request.form.get("parent_uuid", type=str),
+        "mode": "userwork",
+        "render_type": request.form.get("render_type"),
+        "text_prompt": request.form.get("text_prompt"), 
+        "steps": request.form.get("steps", type=int), 
+        "shape": request.form.get("shape"), 
+        "model": request.form.get("model"),
+        "diffusion_model": request.form.get("diffusion_model"),
+        "symmetry": request.form.get("symmetry", type=bool),
+        "symmetry_loss_scale": request.form.get("symmetry_loss_scale", type=int),
+        "cut_schedule": request.form.get("cut_schedule"),
+        "clip_guidance_scale": request.form.get("clip_guidance_scale", type=int),
+        "clamp_max" : request.form.get("clamp_max", type=float),
+        "set_seed" : request.form.get("set_seed", type=int),
+        "cut_ic_pow": request.form.get("cut_ic_pow", type=int),
+        "cutn_batches": request.form.get("cutn_batches", type=int),
+        "sat_scale": request.form.get("sat_scale", type=float),
+        "author": request.form.get("author", type=int),
+        "status": "queued",
+        "eta": request.form.get("eta", type=float),
+        "timestamp": datetime.utcnow()
+    }
+    with get_database() as client:
+        queueCollection = client.database.get_collection("queue")
+        queueCollection.insert_one(newrecord)
+    return "ok"
+
 @app.route("/takeorder/<agent_id>", methods = ["POST"])
 def takeorder(agent_id):
     if request.method == "POST":
@@ -557,3 +687,21 @@ def dream(agent_id):
         "success": True
     }
     return dream_job
+
+# @bot.slash_command(name="refresh_all", description="Refresh all images (temporary utility command)")
+# async def refresh_all(ctx):
+#     await ctx.respond("Acknowledged.", ephemeral=True)
+#     with get_database() as client:
+#         queueCollection = client.database.get_collection("queue")
+#         jobs = queueCollection.find({})
+#         max = 10000000
+#         m = 0
+#         for job in jobs:
+#             if(job.get('progress_msg')):
+#                 m += 1
+#                 if m < max:
+#                     do_refresh(job.get('uuid'))
+#                 else:
+#                     logger.info(f"{job.get('uuid')} max update reached...")
+#             else:
+#                 logger.info("no")
