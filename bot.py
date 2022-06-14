@@ -20,7 +20,6 @@ import warnings
 import json
 from loguru import logger
 from texttable import Texttable
-from db import get_database
 
 warnings.filterwarnings("ignore")
 from profanity_check import predict_prob
@@ -224,10 +223,10 @@ async def task_loop():
     
     # Display any completed jobs
     
-    api = f"{BOT_API}/queue/completed"
+    api = f"{BOT_API}/queue/complete/"
     logger.info(f"🌍 Getting completed jobs from '{api}'...")
     completedJobs = requests.get(api).json()
-    if len(logs)==0:
+    if len(completedJobs)==0:
         logger.info("No completed jobs.")
     else:
         for completedJob in completedJobs:
