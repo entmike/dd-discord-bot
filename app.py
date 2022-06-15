@@ -87,13 +87,16 @@ def pulse(agent_id):
 def queue(status):
     logger.info(f"Queue request for status {status}...")
     if status == "stalled":
-        since = datetime.now() - timedelta(minutes=10)
-        q = {"status": "processing", "last_preview" : {"$lt":since}}
+        since = datetime.now() - timedelta(minutes=30)
+        q = {"status": "processing", "$or": [
+            {"last_preview" : {"$lt":since}},
+            {"last_preview" : {"$exists": False}, "timestamp" : {"$lt":since}}
+        ]}
     else:
         q = {"status": {"$nin": ["archived","rejected"]}}
     # if who == "me":
     #     q["author"] = int(author)
-    if status != "all":
+    if status != "all" and status !="stalled":
         q["status"] = status
     # if status == "all" and who=="me":
     #     del q["status"]
@@ -139,6 +142,51 @@ def ack_log(uuid):
         result = client.database.get_collection("logs").update_one({"uuid": uuid}, {"$set": {"ack": True}})
         logger.info(f"Acknowledged {uuid} ({result.modified_count})")
         return dumps({"modified_count": result.modified_count})
+
+@app.route("/dreams", methods=["GET"])
+def dreams():
+    with get_database() as client:
+        dreams = client.database.get_collection("userdreams").find()
+        return dumps(dreams)
+
+@app.route("/takedream", methods=["GET"])
+def takedream():
+    dream = getOldestDream()
+    return dumps(dream)
+
+def getOldestDream():
+    with get_database() as client:
+        dreamCollection = client.database.get_collection("userdreams")
+        # Get oldest dream
+        dream = dreamCollection.find_one({
+            "$query" : {},
+            "$orderby": {"timestamp": -1}
+        })
+
+        dreamCollection.update_one(
+            { "author_id": dream.get("author_id") },
+            {"$set":
+                { "last_used" : datetime.now() }
+            }, upsert = True)
+        return dream
+
+@app.route("/dream", methods=["POST"])
+def dream():
+    with get_database() as client:
+        # client.database.get_collection("userdreams").insert_one({})
+        dreamCollection = client.database.get_collection("userdreams")
+        dreamCollection.update_one(
+        { "author_id": request.form.get("author_id") },
+        {"$set":
+            { "author_id": request.form.get("author_id"),
+            "dream" : request.form.get("dream"),
+            "last_used" : datetime.now(),
+            "timestamp" : datetime.now() }
+        },
+        upsert = True)
+        
+    logger.info(request.form.get("dream"))
+    return dumps({"message":"received"})
 
 @app.route("/updatejob/<uuid>/", methods=["POST"])
 def updatejob(uuid):
@@ -334,7 +382,10 @@ def progress(agent_id, job_uuid):
     if request.method == "POST":
         gpustats = request.form.get('gpustats')
         if gpustats:
-            memory = int(gpustats.split(", ")[4])
+            try:
+                memory = int(gpustats.split(", ")[4])
+            except:
+                memory = 0
         else:
             memory = 0
         e = {
@@ -500,7 +551,6 @@ def placeorder():
     newrecord = {
         "uuid" : request.form.get("uuid", type=str),
         "parent_uuid" : request.form.get("parent_uuid", type=str),
-        "mode": "userwork",
         "render_type": request.form.get("render_type"),
         "text_prompt": request.form.get("text_prompt"), 
         "steps": request.form.get("steps", type=int), 
@@ -526,6 +576,12 @@ def placeorder():
         queueCollection.insert_one(newrecord)
     return "ok"
 
+@app.route("/search/<regexp>", methods = ["GET"])
+def search(regexp):
+    with get_database() as client:
+        j = client.database.get_collection("queue").find({"text_prompt":{"$regex":regexp, "$options" : "i"}})
+        return dumps(j)
+    
 @app.route("/takeorder/<agent_id>", methods = ["POST"])
 def takeorder(agent_id):
     if request.method == "POST":
@@ -533,7 +589,7 @@ def takeorder(agent_id):
         model = request.form.get('model')
         pulse(agent_id=agent_id)
         mode = "awake"
-        if int(idle_time) > 300:
+        if int(idle_time) > 30:
             mode = "dreaming"
         else:
             mode = "awake"
@@ -595,39 +651,10 @@ def takeorder(agent_id):
 def dream(agent_id):
     import dd_prompt_salad
     job_uuid = uuid.uuid4()
-    templates = [
-        # "beautiful {progrock/style} {progrock/genre} painting of a beatiful scenic forest range surrounded by {adjectives} {colors} {shapes}s, by {artists}"
-        # "intricately detailed hand carved 3D mandelbulb skull made of brilliantly colored volumetric smoke, {artists}, Artstation, Pinterest, Wallpaper 4K"
-        "a scenic beach during a colorful sunset, beautiful glistening palm trees overhanging the shoreline, seagulls flying above, {artists}, Artstation, Pinterest, Wallpaper 4K"
-        # # "Ellen Jewett, beautiful surreal palatial {things} at dawn, gustave dore, ferdinand knab, {artists}",
-        # "a beautifully ultradetailed painting of a mysterious {colors} {locations} on top of a {locations} on the side of a mountain filled with giant orange and purple crystals illuminated by pastel pink fireflies, icy blue mist, morning shot, Alena Aenami, Raphael Lacoste, Makoto Shinkai, 4k, trending on artstation",
-        # # "multiple colorful globes full of {things}s swirling around a hellscape, crystals illuminating the night sky",
-        # "horrific zombies chasing {things}s around a {locations}, art by {artists}",
-        # # "hairy colorful balls of yarn in the shape of a {things}, 35mm, f1.4, bokeh",
-        # "A beautiful painting of a vintage network map with communities seen from above by {artists}, {artists}, {artists} and {artists}"
-        # # "Random starlight {things} flying in {location} {colors}, by {artists}",
-        # # "a horrific decaying {locations} drenched in gory {colors}, art by {artists}",
-        # "an ominous figure standing in a small room surrounded by {things}s, surveillance footage",
-        # "a highly detailed {adjectives} nebula with majestic planets of {of_something}, art by {progrock/artist}, trending on artstation",
-        # "a beautiful watercolor painting of a {adjectives} {animals} in {locations}, art by {artists}, trending on artstation",
-        # # "an ominous sculpture of {animals}s in the shape of {shapes} made of {of_something}, digital painting",
-        # "a horrible {adjectives} {adjectives} fuzzy {locations} soaked in {things}, art by {artists}",
-        # # "a colorful galactic {locations} colored {colors}, art by {artists}",
-        # # "a {things} sinking in a {locations} covered in {things}s, watercolor, trending on artstation",
-        # "an immaculately detailed gothic painting of a {things} surrounded by majestic {things}, art by {artists}, {styles} style",
-        # # "{progrock/adjective} ophanim, tarot card, {progrock/style}",
-        # # "a {progrock/adjective} photo of a {locations} taken by {progrock/artist}, UHD, photorealistic",
-        # "a verdant overgrown {locations}, {progrock/style}",
-        # "{progrock/adjective} {colors} {shapes}s, vector art by {progrock/artist}",
-        # "A beautiful landscape on an alien planet with giant {things}s, and {adjectives} vegetation Giant {colors} and {things} in the {locations} by {artists}, greg rutkowski, {artists}, {artists}, {artists} Trending on artstation, behance"
-        # "The {colors} of the {locations} is a representation of the Viking's obsession with the {locations}",
-        # # "The Korean girl is doing a {progrock/adjective} {progrock/style} painting in the digital age",
-        # # "The face of the {animals} is now etched in the {progrock/style} art of Japan",
-        # "The Veiled Virgin Statue by {progrock/artist} covered in {progrock/adjective} cellophane centered in a {locations}",
-        # # "{progrock/adjective} {animals} crystal"
-    ]
+    dream = getOldestDream()
+    template = dream.get("dream")
+    author_id = dream.get("author_id")
     import random
-    template = random.sample(templates,1)[0]
     shape = random.sample([
         "square", "pano", "landscape","portrait"
     ],1)[0]
@@ -661,7 +688,7 @@ def dream(agent_id):
         text_prompt = salad
         record = {
             "uuid": job_uuid, 
-            "mode": "dream",    # important
+            "render_type": "dream",    # important
             "agent_id": agent_id,
             "text_prompt": text_prompt, 
             "steps": steps, 
@@ -675,7 +702,8 @@ def dream(agent_id):
             "sat_scale": sat_scale,
             "set_seed" : -1,
             "cut_schedule" : cut_schedule,
-            "author": 977198605221912616,
+            # "author": 977198605221912616,
+            "author": author_id,
             "status": "processing",
             "timestamp": datetime.utcnow()}
         queueCollection = client.database.get_collection("queue")

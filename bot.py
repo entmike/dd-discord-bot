@@ -73,7 +73,7 @@ async def queueBroadcast(who, status, author=None, channel = None, messageid=Non
         """
         msgid = job.get("progress_msg")
         details = f"[Job]({BOT_API}/job/{job.get('uuid')})"
-        summary = f"<@{job.get('author')}> | `{job.get('percent')}%` | `{job.get('agent_id')}` | {details}"
+        summary = f"<@{job.get('author')}> | `{job.get('render_type')}` | `{job.get('percent')}%` | `{job.get('agent_id')}` | {details}"
         if msgid:
             if job.get("channel_id"):
                 channel_id = job.get("channel_id")
@@ -85,14 +85,38 @@ async def queueBroadcast(who, status, author=None, channel = None, messageid=Non
                     channel_id = 984590762354298890
                 if job.get("render_type") == "sketch":
                     channel_id = 981398961246052393
+                if job.get("render_type") == "dream":
+                    channel_id = 979832599579090974
             summary =f"{summary} | [Image](https://discord.com/channels/945459234194219029/{channel_id}/{msgid})"
-        embed.add_field(name=f"🎨 {job.get('uuid')}", value=summary, inline=False)
+        embed.add_field(name=f"{job.get('uuid')}", value=summary, inline=False)
+    if messageid != None:
+        message = await channel.fetch_message(messageid)
+        await message.edit(embed = embed)
+
+async def queue_status(channel = None, messageid = None):
+    channel = bot.get_channel(channel)
+    api = f"{BOT_API}/queuestats"
+    logger.info(f"🌍 Getting queue stats from '{api}'...")
+    queuestats = requests.get(api).json()
+
+    embed = discord.Embed(
+        title="Queue Stats",
+        description="The following are the current queue statistics",
+        color=discord.Colour.blurple(),
+    )
+
+    summary = f"""
+    - ⚒️ Running: `{queuestats['processingCount']}`
+    - ⌛ Waiting: `{queuestats['queuedCount']}`
+    - 🖼️ Completed `{queuestats['renderedCount']}`
+    - 🪲 Rejected `{queuestats['rejectedCount']}`
+    """
+    embed.add_field(name="Queue Stats", value=summary, inline=False)
     if messageid != None:
         message = await channel.fetch_message(messageid)
         await message.edit(embed = embed)
     else:
         await channel.send(embed = embed)
-
 
 # this code will be executed every 10 seconds after the bot is ready
 @tasks.loop(seconds=10)
@@ -101,6 +125,9 @@ async def task_loop():
     ticks += 1
     botspam_channels = ["botspam"]
     logger.info("loop")
+    # Queue Stats
+    logger.info("Updating Queue Stats")
+    await queue_status(986272139042779256, 986273742822965309)
     # Agents
     logger.info("Updating Agent Status")
     await agent_status(981934300201103371, 981935410714378310)
@@ -162,36 +189,45 @@ async def task_loop():
                     if duration.total_seconds() < 20:
                         toosoon = True
                 if job:
-                    if job.get("progress_msg") and job.get('status') == 'processing' and toosoon == False:
+                    if job.get('status') == 'processing' and toosoon == False:
                         logger.info(f"⬆️ Updating progress in discord for {job.get('uuid')}")
                         render_type = job.get('render_type')
-                        mode = job.get('mode')
                         if render_type is None:
                             render_type = "render"
-
                         if render_type == "sketch":
                             channel = "sketches"
                         if render_type == "render":
                             channel = "images"
                         if render_type == "mutate":
                             channel = "mutations"
-                        if mode == "dream":
+                        if render_type == "dream":
                             channel = "day-dreams"
+                        
+                        logger.info(f"🤩 {channel}")
                         channel = discord.utils.get(bot.get_all_channels(), name=channel)
                         # logger.info(f"Updating message {job.get('progress_msg')}...")
                         try:
-                            message = await channel.fetch_message(job.get("progress_msg"))
+                            if job.get("progress_msg"):
+                                msgid = job.get("progress_msg")
+                            else:
+                                msg = await channel.send(embed = embed, view=view)
+                                api = f"{BOT_API}/updatejob/{job.get('uuid')}/"
+                                logger.info(f"🌍 Updating Job '{api}'...")
+                                requests.post(api, data={"progress_msg": msg.id}).json()
+                                msgid = msg.id
+                            message = await channel.fetch_message(msgid)
                             if file:
                                 await message.edit(file = file, view = view, embed = embed)
                             else:
                                 await message.edit(embed = embed, view = view)
                         except:
-                            pass
                             # logger.error(f"Could not update message {job.get('progress_msg')}")
+                            pass
+
                         api = f"{BOT_API}/updatejob/{job_uuid}/"
                         logger.info(f"🌍 Updating Job '{api}'...")
                         requests.post(api, data={"last_preview": datetime.datetime.now()}).json()
-        
+                        
             api = f"{BOT_API}/ack_event/{event.get('uuid')}"
             # logger.info(f"🌍 Ack event '{event.get('uuid')}'...")
             requests.get(api).json()
@@ -236,14 +272,13 @@ async def task_loop():
             mode = completedJob.get('mode')
             if render_type is None:
                 render_type = "render"
-
             if render_type == "sketch":
                 channel = "sketches"
             if render_type == "render":
                 channel = "images"
             if render_type == "mutate":
                 channel = "mutations"
-            if mode == "dream":
+            if render_type == "dream":
                 channel = "day-dreams"
             channels = ["images-discussion", channel]
 
@@ -308,21 +343,21 @@ async def task_loop():
     
     # Drop any stalled jobs
     
-    api = f"{BOT_API}/queue/stalled"
-    logger.info(f"🌍 Getting stalled jobs from '{api}'...")
-    stalls = requests.get(api).json()
-    for stall in stalls:
-        for channel in botspam_channels:
-            channel = discord.utils.get(bot.get_all_channels(), name=channel)
-            embed = discord.Embed(
-                title="😠 Job Stalled 😠",
-                description=f"Job `{stall.get('uuid')}` from <@{stall.get('author')}> was apparently abandoned by `{stall.get('agent_id')}`  Reassigning in queue.",
-                color=discord.Colour.orange(),
-            )
-            await channel.send(embed=embed)
-        api = f"{BOT_API}/updatejob/{failedJob.get('uuid')}/"
-        logger.info(f"🌍 Updating Job '{api}'...")
-        requests.post(api, data={"status": "queued", "agent_id" : None, "percent" : None, "last_preview" : None}).json()
+    # api = f"{BOT_API}/queue/stalled"
+    # logger.info(f"🌍 Getting stalled jobs from '{api}'...")
+    # stalls = requests.get(api).json()
+    # for stall in stalls:
+    #     for channel in botspam_channels:
+    #         channel = discord.utils.get(bot.get_all_channels(), name=channel)
+    #         embed = discord.Embed(
+    #             title="😠 Job Stalled 😠",
+    #             description=f"Job `{stall.get('uuid')}` from <@{stall.get('author')}> was apparently abandoned by `{stall.get('agent_id')}`  Reassigning in queue.",
+    #             color=discord.Colour.orange(),
+    #         )
+    #         await channel.send(embed=embed)
+        #api = f"{BOT_API}/updatejob/{stall.get('uuid')}/"
+        #logger.info(f"🌍 Updating Job '{api}'...")
+        #requests.post(api, data={"status": "queued", "agent_id" : None, "percent" : None, "last_preview" : None}).json()
     logger.info("end loop")
 
 class MyModal(Modal):
@@ -623,7 +658,6 @@ async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_gui
         record = {
             "uuid": job_uuid, 
             "parent_uuid": parent_uuid,
-            "mode": "userwork",
             "render_type": render_type,
             "text_prompt": text_prompt, 
             "steps": steps, 
@@ -654,6 +688,8 @@ async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_gui
             channel = "images"
         if render_type == "mutate":
             channel = "mutations"
+        if render_type == "dream":
+            channel = "day-dreams"
 
         channel = discord.utils.get(bot.get_all_channels(), name=channel)
         msg = await channel.send(embed=embed, view=view)
@@ -666,6 +702,13 @@ async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_gui
 
     else:
         await ctx.respond("\n".join(reasons), ephemeral=True)
+
+@bot.command(description="Make a dream")
+async def dream(ctx, dream: discord.Option(str, "Enter your dream", required=True),):
+    api = f"{BOT_API}/dream"
+    logger.info(f"🌍 Updating Job '{api}'...")
+    u = requests.post(api, data={"author_id": ctx.author.id, "dream" : dream}).json()
+    await ctx.respond(f"🌛 Thanks! 🐑", ephemeral=True)
 
 @bot.command(description="Mutate a Disco Diffusion Render")
 async def mutate(
@@ -885,6 +928,8 @@ async def channel_erase(job):
         channel = "images"
     if render_type == "mutate":
         channel = "mutations"
+    if render_type == "dream":
+        channel = "day-dreams"
     channel = discord.utils.get(bot.get_all_channels(), name=channel)
     msg = await channel.fetch_message(job.get('progress_msg'))
     logger.info(f"{msg.id} deleted.")
@@ -923,26 +968,9 @@ async def repeat(ctx, job_uuid, set_seed: discord.Option(int, "Seed", required=F
 async def query(ctx, uuid):
     await ctx.respond(f"{BOT_API}/query/{uuid}")
 
-@bot.command(description="View queue statistics")
-async def queuestats(ctx):
-    api = f"{BOT_API}/queuestats"
-    logger.info(f"🌍 Getting queue stats from '{api}'...")
-    queuestats = requests.get(api).json()
-
-    embed = discord.Embed(
-        title="Queue Stats",
-        description="The following are the current queue statistics",
-        color=discord.Colour.blurple(),
-    )
-
-    summary = f"""
-    - ⚒️ Running: `{queuestats['processingCount']}`
-    - ⌛ Waiting: `{queuestats['queuedCount']}`
-    - 🖼️ Completed `{queuestats['renderedCount']}`
-    - 🪲 Rejected `{queuestats['rejectedCount']}`
-    """
-    embed.add_field(name="Queue Stats", value=summary, inline=False)
-    await ctx.respond(embed=embed)
+@bot.command(description="Search by text")
+async def search(ctx, regexp):
+    await ctx.respond(f"{BOT_API}/search/{regexp}")
 
 @bot.command(description="View first 5 rejects")
 async def rejects(ctx):
@@ -977,7 +1005,11 @@ async def agent_status(channel, messageid):
         last_seen = agent.get('last_seen')
         if last_seen:
             strdate = agent.get("last_seen")["$date"]
-            last_seen = datetime.datetime.strptime(strdate,'%Y-%m-%dT%H:%M:%S.%fZ')
+            try:
+                last_seen = datetime.datetime.strptime(strdate,'%Y-%m-%dT%H:%M:%S.%fZ')
+            except:
+                last_seen = datetime.datetime.strptime(strdate,'%Y-%m-%dT%H:%M:%SZ')
+            # last_seen = datetime.datetime.strptime(strdate,'%Y-%m-%dT%H:%M:%S.%fZ')
         data.append([agent.get("agent_id"),last_seen.strftime("%Y-%m-%d %H:%M:%S"),agent.get('score'),agent.get('mode'),agent.get('model_mode'),gpustats])
         
     table.add_rows(data)
