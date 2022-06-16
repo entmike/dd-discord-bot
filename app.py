@@ -146,7 +146,10 @@ def ack_log(uuid):
 @app.route("/dreams", methods=["GET"])
 def dreams():
     with get_database() as client:
-        dreams = client.database.get_collection("userdreams").find()
+        dreams = client.database.get_collection("userdreams").find({
+            "$query" : {},
+            "$orderby": {"timestamp": 1}
+        })
         return dumps(dreams)
 
 @app.route("/takedream", methods=["GET"])
@@ -159,8 +162,8 @@ def getOldestDream():
         dreamCollection = client.database.get_collection("userdreams")
         # Get oldest dream
         dream = dreamCollection.find_one({
-            "$query" : {},
-            "$orderby": {"timestamp": -1}
+            "$query" : {"dream": {"$exists": True}},
+            "$orderby": {"last_used": 1}
         })
 
         dreamCollection.update_one(
@@ -169,6 +172,14 @@ def getOldestDream():
                 { "last_used" : datetime.now() }
             }, upsert = True)
         return dream
+
+@app.route("/awaken/<author_id>", methods=["GET"])
+def awaken(author_id):
+    with get_database() as client:
+        dreamCollection = client.database.get_collection("userdreams")
+        dreamCollection.delete_many({"dream": {"$exists": False}})
+        dreamCollection.delete_one({"author_id" : author_id})
+        return dumps({"message": f"Dream for {author_id} deleted."})
 
 @app.route("/dream", methods=["POST"])
 def dream():
@@ -220,10 +231,14 @@ def rejects():
 @app.route("/myhistory/<author_id>", methods=["GET"], defaults={'status': 'all'})
 @app.route("/myhistory/<author_id>/<status>", methods=["GET"])
 def myhistory(author_id, status):
+    author_qry = [
+        {"author" : int(author_id)},
+        {"author" : str(author_id)}
+    ]
     if status == 'all':
-        q = {"author" : int(author_id)}
+        q = {"$or" : author_qry}
     else:
-        q = {"author" : int(author_id), "status" : status}
+        q = {"$or" : author_qry, "status" : status}
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
         jobs = queueCollection.find(q)
@@ -653,6 +668,9 @@ def dream(agent_id):
     job_uuid = uuid.uuid4()
     dream = getOldestDream()
     template = dream.get("dream")
+    salad = dd_prompt_salad.make_random_prompt(amount=1, prompt_salad_path="prompt_salad", template=template)[0]
+    text_prompt = salad
+    logger.info(text_prompt)
     author_id = dream.get("author_id")
     import random
     shape = random.sample([
@@ -684,8 +702,6 @@ def dream(agent_id):
     ],1)[0]
     with get_database() as client:
         job_uuid = str(job_uuid)
-        salad = dd_prompt_salad.make_random_prompt(amount=1, prompt_salad_path="prompt_salad", template=template)[0]
-        text_prompt = salad
         record = {
             "uuid": job_uuid, 
             "render_type": "dream",    # important

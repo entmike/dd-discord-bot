@@ -186,7 +186,7 @@ async def task_loop():
                     n = datetime.datetime.now()
                     duration = n - last_preview
                     # logger.info(duration)
-                    if duration.total_seconds() < 20:
+                    if duration.total_seconds() < 30:
                         toosoon = True
                 if job:
                     if job.get('status') == 'processing' and toosoon == False:
@@ -266,10 +266,10 @@ async def task_loop():
         logger.info("No completed jobs.")
     else:
         for completedJob in completedJobs:
-            logger.info(f"Found completed job: Mode: {completedJob.get('mode')}")
+            logger.info(f"Found completed job: Render Type: {completedJob.get('render_type')}")
             
             render_type = completedJob.get('render_type')
-            mode = completedJob.get('mode')
+
             if render_type is None:
                 render_type = "render"
             if render_type == "sketch":
@@ -706,9 +706,17 @@ async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_gui
 @bot.command(description="Make a dream")
 async def dream(ctx, dream: discord.Option(str, "Enter your dream", required=True),):
     api = f"{BOT_API}/dream"
-    logger.info(f"🌍 Updating Job '{api}'...")
+    logger.info(f"🌍 Changing Dream '{api}'...")
     u = requests.post(api, data={"author_id": ctx.author.id, "dream" : dream}).json()
     await ctx.respond(f"🌛 Thanks! 🐑", ephemeral=True)
+
+@bot.command(description="Stop dreaming")
+async def wakeup(ctx):
+    api = f"{BOT_API}/awaken/{ctx.author.id}"
+    logger.info(f"🌍 Waking up '{api}'...")
+    u = requests.get(api).json()
+    await ctx.respond(f"🌄 I'm awake.  Dreams stopped. 👀", ephemeral=True)
+
 
 @bot.command(description="Mutate a Disco Diffusion Render")
 async def mutate(
