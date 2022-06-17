@@ -22,10 +22,32 @@ load_dotenv()
 UPLOAD_FOLDER = "images"
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "log"}
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+BOT_SALT = os.getenv('BOT_SALT')
+BOT_WEBSITE = os.getenv('BOT_WEBSITE')
 
 app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
+@app.route("/register/<agent_id>")
+def register(agent_id):
+    status = ""
+    with get_database() as client:
+        agentCollection = client.database.get_collection("agents")
+        if agentCollection.count_documents({"agent_id": agent_id}) == 0:
+            found = False
+        else:
+            found = True
+
+        if not found:
+            token = hashlib.sha256(f"{agent_id}{BOT_SALT}".encode("utf-8")).hexdigest()
+            agentCollection.insert_one({"agent_id": agent_id, "last_seen": datetime.now()})
+            status = f"✅ Registered!  Your API token is '{token}'.  Save this, you won't see it again."
+            log(f"A new agent has joined! 😍 Thank you, {agent_id}!", title="🆕 New Agent")
+            success = True
+        else:
+            status = f"😓 Sorry, someone already registered an agent by that name.  Try another one!"
+            success = False
+    return jsonify({"message" : status, "success" : success})
 
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -55,26 +77,6 @@ def toggle_pin(user_id, uuid):
         else:
             client.database.get_collection("pins").insert_one({"uuid": uuid, "user" : user_id})
             return dumps({"message":"Pinned"})
-
-@app.route("/register/<agent_id>")
-def register(agent_id):
-    status = ""
-    with get_database() as client:
-        agentCollection = client.database.get_collection("agents")
-        if agentCollection.count_documents({"agent_id": agent_id}) == 0:
-            found = False
-        else:
-            found = True
-
-        if not found:
-            salt = "SaltyBoi"
-            token = hashlib.sha256(f"{agent_id}{salt}".encode("utf-8")).hexdigest()
-            agentCollection.insert_one({"agent_id": agent_id, "last_seen": datetime.now()})
-            status = f"✅ Registered!  Your API token is '{token}'.  Save this, you won't see it again."
-            log(f"A new agent has joined! 😍 Thank you, {agent_id}!", title="🆕 New Agent")
-        else:
-            status = f"😓 Sorry, someone already registered an agent by that name.  Try another one!"
-    return status
 
 def pulse(agent_id):
     with get_database() as client:
@@ -129,6 +131,8 @@ def logs():
 
 @app.route("/ack_event/<uuid>/")
 def ack_event(uuid):
+    if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
+        return jsonify({"message": "ERROR: Unauthorized"}), 401
     logger.info(f"Acknowledging event '{uuid}'")
     with get_database() as client:
         result = client.database.get_collection("events").delete_one({"uuid" :uuid})
@@ -137,6 +141,8 @@ def ack_event(uuid):
 
 @app.route("/ack_log/<uuid>/")
 def ack_log(uuid):
+    if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
+        return jsonify({"message": "ERROR: Unauthorized"}), 401
     logger.info(f"Acknowledging log '{uuid}'")
     with get_database() as client:
         result = client.database.get_collection("logs").update_one({"uuid": uuid}, {"$set": {"ack": True}})
@@ -181,10 +187,43 @@ def awaken(author_id):
         dreamCollection.delete_one({"author_id" : author_id})
         return dumps({"message": f"Dream for {author_id} deleted."})
 
+@app.route("/serverinfo", methods=["POST"])
+def serverinfo_post():
+    if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
+        return jsonify({"message": "ERROR: Unauthorized"}), 401
+    with get_database() as client:
+        postsCollection = client.database.get_collection("serverposts")
+        doc = {
+            "subject": request.form.get("subject"),
+            "channel": int(request.form.get("channel")),
+            "message": int(request.form.get("message")),
+            "timestamp" : datetime.now()
+        }
+        logger.info(doc)
+        postsCollection.update_one(
+        {
+            "subject": request.form.get("subject")
+        },{
+            "$set": doc
+        },
+        upsert = True)
+        return jsonify({"message" : "ok"})
+
+@app.route("/serverinfo/<subject>", methods=["GET"])
+def serverinfo(subject):
+    with get_database() as client:
+        postsCollection = client.database.get_collection("serverposts")
+        post = postsCollection.find_one(
+        {
+            "subject": subject
+        })
+        return dumps(post)
+
 @app.route("/dream", methods=["POST"])
 def dream():
+    if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
+        return jsonify({"message": "ERROR: Unauthorized"}), 401
     with get_database() as client:
-        # client.database.get_collection("userdreams").insert_one({})
         dreamCollection = client.database.get_collection("userdreams")
         dreamCollection.update_one(
         { "author_id": request.form.get("author_id") },
@@ -199,8 +238,11 @@ def dream():
     logger.info(request.form.get("dream"))
     return dumps({"message":"received"})
 
-@app.route("/updatejob/<uuid>/", methods=["POST"])
-def updatejob(uuid):
+@app.route("/updatejob", methods=["POST"])
+def updatejob():
+    if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
+        return jsonify({"message": "ERROR: Unauthorized"}), 401
+    uuid = request.form.get("uuid")
     logger.info(f"Updating job '{uuid}'")
     vals = request.form
     newvals = {}
@@ -327,11 +369,6 @@ def image(job_uuid):
         return send_file(fn, mimetype='image/png')
     except:
         return f"Could not locate {filename}.  This might be because the render has not completed yet.  Or because the job failed.  Or check your job uuid.  Or a gremlin ate the image.  Probably the gremlin."
-# @app.route("/image/<job_uuid>", methods=["GET"])
-# def image(job_uuid):
-#     filename = f"{job_uuid}(0)_0.png"
-#     fn = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-#     return send_file(fn, mimetype='image/png')
 
 @app.route("/reject/<agent_id>/<job_uuid>", methods=["POST"])
 def reject(agent_id, job_uuid):
@@ -458,14 +495,12 @@ def preview_file(agent_id, job_uuid):
             event(e)
             with get_database() as client:
                 queueCollection = client.database.get_collection("queue")
-                results = queueCollection.update_one({
+                queueCollection.update_one({
                     "agent_id": agent_id, 
                     "uuid": job_uuid}, {"$set": {"preview": True}})
             return f"{job_uuid}_filename"
         else:
             return "Bad file."
-
-
 
 
 @app.route("/upload/<agent_id>/<job_uuid>", methods=["GET", "POST"])
@@ -536,8 +571,8 @@ def upload_file(agent_id, job_uuid):
 
 
 @app.route("/")
-def hello_world():
-    return "<p>Hello, World!</p>"
+def base():
+    return redirect(BOT_WEBSITE, code=302)
 
 @app.route("/clearlogs")
 def clearlogs():

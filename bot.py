@@ -37,6 +37,13 @@ STEP_LIMIT = int(os.getenv("STEP_LIMIT", 150))
 PROFANITY_THRESHOLD = float(os.getenv("PROFANITY_THRESHOLD", 0.7))
 AUTHOR_LIMIT = int(os.getenv("AUTHOR_LIMIT", 2))
 
+def updateJob(data):
+    """
+    Updates a Job by `uuid` via API call.
+    """
+    api = f"{BOT_API}/updatejob"
+    logger.info(f"🌍 Updating Job '{api}'...")
+    return requests.post(api, data=data, headers={"x-dd-bot-token":BOT_TOKEN}).json()
 
 def lazy(obj, field):
     if obj.has_key(field):
@@ -45,8 +52,14 @@ def lazy(obj, field):
         return None
 
 
-async def queueBroadcast(who, status, author=None, channel = None, messageid=None, label="queue"):
-    channel = bot.get_channel(channel)
+async def queueBroadcast(who, status, author=None, channel = None, label="queue"):
+    messageid = None
+    subject = requests.get(f"{BOT_API}/serverinfo/{label}").json()
+    if subject:
+        channel = int(subject["channel"])
+        messageid = int(subject["message"])
+    channelid = channel
+    channel = bot.get_channel(channelid)
     # Get data from API
     api = f"{BOT_API}/queue/{status}"
     logger.info(f"🌍 Getting queue from '{api}'...")
@@ -60,6 +73,7 @@ async def queueBroadcast(who, status, author=None, channel = None, messageid=Non
         description=f"The following requests are {status}",
         color=color,  # Pycord provides a class with default colors you can choose from
     )
+    embed.set_footer(text = f"Last update: {datetime.datetime.now()}")
     for j, job in enumerate(queue):
         user = await bot.fetch_user(job.get("author"))
         summary = f"""
@@ -92,6 +106,14 @@ async def queueBroadcast(who, status, author=None, channel = None, messageid=Non
     if messageid != None:
         message = await channel.fetch_message(messageid)
         await message.edit(embed = embed)
+    else:
+        msg = await channel.send(embed = embed)
+        messageid = msg.id
+        requests.post(f"{BOT_API}/serverinfo", headers={"x-dd-bot-token":BOT_TOKEN}, data={
+            "subject" : label,
+            "channel": int(channelid),
+            "message": int(messageid)
+        }).json()
 
 async def queue_status(channel = None, messageid = None):
     channel = bot.get_channel(channel)
@@ -112,6 +134,7 @@ async def queue_status(channel = None, messageid = None):
     - 🪲 Rejected `{queuestats['rejectedCount']}`
     """
     embed.add_field(name="Queue Stats", value=summary, inline=False)
+    embed.set_footer(text = f"Last update: {datetime.datetime.now()}")
     if messageid != None:
         message = await channel.fetch_message(messageid)
         await message.edit(embed = embed)
@@ -133,10 +156,10 @@ async def task_loop():
     await agent_status(981934300201103371, 981935410714378310)
     # Active
     logger.info("Updating Active Queue")
-    await queueBroadcast("all", "processing", None, 981250881167196280, 981572405468209162,"active")
+    await queueBroadcast("all", "processing", None, 981250881167196280, "active")
     # Waiting
     logger.info("Updating Waiting Queue")
-    await queueBroadcast("all", "queued", None, 981250961534255186, 981582971477848084, "waiting")
+    await queueBroadcast("all", "queued", None, 981250961534255186, "waiting")
     # Process any Events
     logger.info("checking events")
     api = f"{BOT_API}/events"
@@ -211,9 +234,10 @@ async def task_loop():
                                 msgid = job.get("progress_msg")
                             else:
                                 msg = await channel.send(embed = embed, view=view)
-                                api = f"{BOT_API}/updatejob/{job.get('uuid')}/"
-                                logger.info(f"🌍 Updating Job '{api}'...")
-                                requests.post(api, data={"progress_msg": msg.id}).json()
+                                updateJob({
+                                    "uuid" : job.get('uuid'),
+                                    "progress_msg": msg.id
+                                })
                                 msgid = msg.id
                             message = await channel.fetch_message(msgid)
                             if file:
@@ -222,20 +246,17 @@ async def task_loop():
                                 await message.edit(embed = embed, view = view)
                         except:
                             # logger.error(f"Could not update message {job.get('progress_msg')}")
-                            pass
-
-                        api = f"{BOT_API}/updatejob/{job_uuid}/"
-                        logger.info(f"🌍 Updating Job '{api}'...")
-                        requests.post(api, data={"last_preview": datetime.datetime.now()}).json()
-                        
+                            pass                       
+                        updateJob({
+                            "uuid" : job_uuid,
+                            "last_preview": datetime.datetime.now()
+                        })
+            # Acknowledge (delete) event
             api = f"{BOT_API}/ack_event/{event.get('uuid')}"
-            # logger.info(f"🌍 Ack event '{event.get('uuid')}'...")
-            requests.get(api).json()
-            # logger.info(f"Deleted {d} processed event(s).")
-        # eventCollection.update_one({"uuid": event.get("uuid")}, {"$set": {"ack": True}})
+            requests.get(api, headers={"x-dd-bot-token":BOT_TOKEN}).json()
+            
     
     # Display any new messages
-    logger.info("checking logs")
     api = f"{BOT_API}/logs/"
     logger.info(f"🌍 Getting logs from '{api}'...")
     logs = requests.get(api).json()
@@ -255,7 +276,7 @@ async def task_loop():
         
         api = f"{BOT_API}/ack_log/{message.get('uuid')}/"
         logger.info(f"🌍 Ack log '{message.get('uuid')}'...")
-        requests.get(api).json()
+        requests.get(api, headers={"x-dd-bot-token":BOT_TOKEN}).json()
     
     # Display any completed jobs
     
@@ -301,9 +322,10 @@ async def task_loop():
                 except Exception as e:
                     tb = traceback.format_exc()
                     await channel.send(f"💀 Cannot display {completedJob.get('uuid')}\n`{tb}`")
-            api = f"{BOT_API}/updatejob/{completedJob.get('uuid')}/"
-            logger.info(f"🌍 Updating Job '{api}'...")
-            requests.post(api, data={"status": "archived"}).json()
+            updateJob({
+                "uuid" : completedJob.get('uuid'),
+                "status": "archived"
+            })
 
     # Display any failed jobs
     
@@ -337,9 +359,11 @@ async def task_loop():
                 rejectedCount+=1
             else:
                 rejectedCount = 0
-            api = f"{BOT_API}/updatejob/{failedJob.get('uuid')}/"
-            logger.info(f"🌍 Updating Job '{api}'...")
-            requests.post(api, data={"status": "rejected", "rejectedCount" : rejectedCount}).json()
+            updateJob({
+                "uuid" : failedJob.get('uuid'),
+                "status": "rejected",
+                "rejectedCount" : rejectedCount
+            })
     
     # Drop any stalled jobs
     
@@ -694,9 +718,10 @@ async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_gui
         channel = discord.utils.get(bot.get_all_channels(), name=channel)
         msg = await channel.send(embed=embed, view=view)
         
-        api = f"{BOT_API}/updatejob/{job_uuid}/"
-        logger.info(f"🌍 Updating Job '{api}'...")
-        requests.post(api, data={"progress_msg": msg.id}).json()
+        updateJob({
+            "uuid" : job_uuid,
+            "progress_msg": msg.id
+        })
 
         await ctx.respond("Command Accepted.", ephemeral=True)
 
@@ -707,7 +732,7 @@ async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_gui
 async def dream(ctx, dream: discord.Option(str, "Enter your dream", required=True),):
     api = f"{BOT_API}/dream"
     logger.info(f"🌍 Changing Dream '{api}'...")
-    u = requests.post(api, data={"author_id": ctx.author.id, "dream" : dream}).json()
+    u = requests.post(api, data={"author_id": ctx.author.id, "dream" : dream}, headers={"x-dd-bot-token":BOT_TOKEN}).json()
     await ctx.respond(f"🌛 Thanks! 🐑", ephemeral=True)
 
 @bot.command(description="Stop dreaming")
@@ -960,9 +985,10 @@ async def retry(ctx, uuid):
 
 @bot.command(description="Retry a render request (intended for anims)")
 async def sudo_retry(ctx, uuid):
-    api = f"{BOT_API}/updatejob/{uuid}/"
-    logger.info(f"🌍 Updating Job '{api}'...")
-    u = requests.post(api, data={"status": "queued"}).json()
+    u=updateJob({
+        "uuid" : uuid,
+        "status" : "queued"
+    })
     if u["matched_count"] == 0:
         await ctx.respond(f"❌ Cannot retry {uuid}", ephemeral=True)
     else:
@@ -990,7 +1016,7 @@ async def myhistory(ctx):
     await ctx.respond(f"https://api.feverdreams.app/myhistory/{ctx.author.id}", ephemeral=True)
 
 async def agent_status(channel, messageid):
-    channel = bot.get_channel(channel)  
+    channel = bot.get_channel(channel)
     table = Texttable(160)
     table.set_deco(Texttable.HEADER)
     # 't',  # text
@@ -1022,13 +1048,20 @@ async def agent_status(channel, messageid):
         
     table.add_rows(data)
     t = table.draw()
+    embed = discord.Embed(
+        title="Agent Status",
+        description=f"The following GPUs are working:",
+        color = discord.Colour.green(),
+    )
+    embed.add_field(name="Agents", value=f"```\n{t[:750]}\n```", inline=False)
+    embed.set_footer(text = f"Last update: {datetime.datetime.now()}")
     if messageid != None:
         message = await channel.fetch_message(messageid)
-        # await message.edit(embed = embed)
-        await message.edit(f"""```\n{t[:1500]}\n```""")
+        await message.edit(embed = embed)
+        # await message.edit(f"""```\n{t[:1500]}\n```""")
     else:
-        # await channel.send(embed = embed)
-        await message.send(f"""```\n{t[:1900]}\n```""")
+        await channel.send(embed = embed)
+        # await message.send(f"""```\n{t[:1900]}\n```""")
 
 
 if __name__ == "__main__":
