@@ -22,20 +22,35 @@ from loguru import logger
 from texttable import Texttable
 
 warnings.filterwarnings("ignore")
-from profanity_check import predict_prob
+# from profanity_check import predict_prob
 
 load_dotenv()
 
-bot = discord.Bot(debug_guilds=[945459234194219029])  # specify the guild IDs in debug_guilds
-arr = []
-agents = []
-ticks = 0
-
 BOT_API = os.getenv('BOT_API')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+BOT_NAME = os.getenv('BOT_NAME')
+BOT_ICON = os.getenv('BOT_ICON')
+
+DISCORD_SERVER_ID = os.getenv('DISCORD_SERVER_ID')
+DISCORD_DAY_DREAMS = os.getenv('DISCORD_DAY_DREAMS')
+DISCORD_SKETCHES = os.getenv('DISCORD_SKETCHES')
+DISCORD_MUTATIONS = os.getenv('DISCORD_MUTATIONS')
+DISCORD_IMAGES = os.getenv('DISCORD_IMAGES')
+DISCORD_ACTIVE_JOBS = os.getenv('DISCORD_ACTIVE_JOBS')
+DISCORD_WAITING_JOBS = os.getenv('DISCORD_WAITING_JOBS')
+DISCORD_QUEUE_STATS = os.getenv('DISCORD_QUEUE_STATS')
+DISCORD_AGENT_STATS = os.getenv('DISCORD_AGENT_STATS')
+DISCORD_QUEUE_STATS_MSG = os.getenv('DISCORD_QUEUE_STATS_MSG')
+DISCORD_AGENT_STATS_MSG = os.getenv('DISCORD_AGENT_STATS_MSG')
+
 STEP_LIMIT = int(os.getenv("STEP_LIMIT", 150))
 PROFANITY_THRESHOLD = float(os.getenv("PROFANITY_THRESHOLD", 0.7))
 AUTHOR_LIMIT = int(os.getenv("AUTHOR_LIMIT", 2))
+
+bot = discord.Bot(debug_guilds=[DISCORD_SERVER_ID])  # specify the guild IDs in debug_guilds
+arr = []
+agents = []
+ticks = 0
 
 def updateJob(data):
     """
@@ -94,14 +109,14 @@ async def queueBroadcast(who, status, author=None, channel = None, label="queue"
             else:
                 # bw compatibility
                 if job.get("render_type") == "render" or job.get("render_type") == "repeat":
-                    channel_id = 979027153029070918
+                    channel_id = DISCORD_IMAGES
                 if job.get("render_type") == "mutate":
-                    channel_id = 984590762354298890
+                    channel_id = DISCORD_MUTATIONS
                 if job.get("render_type") == "sketch":
-                    channel_id = 981398961246052393
+                    channel_id = DISCORD_SKETCHES
                 if job.get("render_type") == "dream":
-                    channel_id = 979832599579090974
-            summary =f"{summary} | [Image](https://discord.com/channels/945459234194219029/{channel_id}/{msgid})"
+                    channel_id = DISCORD_DAY_DREAMS
+            summary =f"{summary} | [Image](https://discord.com/channels/{DISCORD_SERVER_ID}/{channel_id}/{msgid})"
         embed.add_field(name=f"{job.get('uuid')}", value=summary, inline=False)
     if messageid != None:
         message = await channel.fetch_message(messageid)
@@ -150,16 +165,16 @@ async def task_loop():
     logger.info("loop")
     # Queue Stats
     logger.info("Updating Queue Stats")
-    await queue_status(986272139042779256, 986273742822965309)
+    await queue_status(DISCORD_QUEUE_STATS, DISCORD_QUEUE_STATS_MSG)
     # Agents
     logger.info("Updating Agent Status")
-    await agent_status(981934300201103371, 981935410714378310)
+    await agent_status(DISCORD_AGENT_STATS, DISCORD_AGENT_STATS_MSG)
     # Active
     logger.info("Updating Active Queue")
-    await queueBroadcast("all", "processing", None, 981250881167196280, "active")
+    await queueBroadcast("all", "processing", None, DISCORD_ACTIVE_JOBS, "active")
     # Waiting
     logger.info("Updating Waiting Queue")
-    await queueBroadcast("all", "queued", None, 981250961534255186, "waiting")
+    await queueBroadcast("all", "queued", None, DISCORD_WAITING_JOBS, "waiting")
     # Process any Events
     logger.info("checking events")
     api = f"{BOT_API}/events"
@@ -538,8 +553,8 @@ def retrieve(uuid):
         ]
     )
     embed.set_author(
-        name="Fever Dream",
-        icon_url="https://cdn.howles.cloud/feverdream.png",
+        name=BOT_NAME,
+        icon_url=BOT_ICON,
     )
     embed.set_footer(text = f"{job.get('uuid')}")
 
@@ -670,10 +685,10 @@ async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_gui
     if steps > STEP_LIMIT:
         reject = True
         reasons.append(f"- ❌ Too many steps.  Limit your steps to {STEP_LIMIT}")
-    profanity = predict_prob([text_prompt])[0]
-    if profanity >= PROFANITY_THRESHOLD:
-        reject = True
-        reasons.append(f"- ❌ Profanity detected.  Watch your fucking mouth.")
+    # profanity = predict_prob([text_prompt])[0]
+    # if profanity >= PROFANITY_THRESHOLD:
+    #     reject = True
+    #     reasons.append(f"- ❌ Profanity detected.  Watch your fucking mouth.")
     if not reject:           
         api = f"{BOT_API}/placeorder"
         logger.info(f"🌍 Placing Order at '{api}'...")
@@ -1020,7 +1035,7 @@ async def rejects(ctx):
 
 @bot.command(description="View your history")
 async def myhistory(ctx):
-    await ctx.respond(f"https://api.feverdreams.app/myhistory/{ctx.author.id}", ephemeral=True)
+    await ctx.respond(f"{BOT_PUBLIC_API}/myhistory/{ctx.author.id}", ephemeral=True)
 
 async def agent_status(channel, messageid):
     channel = bot.get_channel(channel)
