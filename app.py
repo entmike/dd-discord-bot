@@ -24,6 +24,7 @@ ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "log"}
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 BOT_SALT = os.getenv('BOT_SALT')
 BOT_WEBSITE = os.getenv('BOT_WEBSITE')
+MAX_DREAM_OCCURENCE = os.getenv('MAX_DREAM_OCCURENCE')
 
 app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
@@ -83,6 +84,14 @@ def pulse(agent_id):
         agentCollection = client.database.get_collection("agents")
         agentCollection.update_one({"agent_id": agent_id},
         {"$set": {"last_seen": datetime.now()}})
+
+def user_pulse(author_id):
+    with get_database() as client:
+        agentCollection = client.database.get_collection("users")
+        agentCollection.update_one(
+            {"user_id": author_id},
+            {"$set": {"last_seen": datetime.now()}},
+        upsert = True)
 
 @app.route("/queue/", methods=["GET"], defaults={'status': 'all'})
 @app.route("/queue/<status>/")
@@ -168,16 +177,31 @@ def getOldestDream():
         dreamCollection = client.database.get_collection("userdreams")
         # Get oldest dream
         dream = dreamCollection.find_one({
-            "$query" : {"dream": {"$exists": True}},
+            "$query" : {
+                "dream": {"$exists": True}, 
+                "$or" : [
+                    {"count":{"$lt": 20}},
+                    {"count":{"$exists": False}}
+                ]
+            },
             "$orderby": {"last_used": 1}
         })
-
-        dreamCollection.update_one(
-            { "author_id": dream.get("author_id") },
-            {"$set":
-                { "last_used" : datetime.now() }
-            }, upsert = True)
-        return dream
+        if dream:
+            if(dream.get("count")):
+                count = dream.get("count") + 1
+            else:
+                count = 1
+            dreamCollection.update_one(
+                { "author_id": dream.get("author_id") },
+                {"$set":
+                    { "last_used" : datetime.now(),
+                      "count" : count
+                    }
+                }, upsert = True)
+            return dream
+        else:
+            logger.info("no dream")
+            return None
 
 @app.route("/awaken/<author_id>", methods=["GET"])
 def awaken(author_id):
@@ -228,8 +252,9 @@ def dream():
         dreamCollection.update_one(
         { "author_id": request.form.get("author_id") },
         {"$set":
-            { "author_id": request.form.get("author_id"),
+            { "author_id": request.form.get("author_id", type=int),
             "dream" : request.form.get("dream"),
+            "count" : 0,
             "last_used" : datetime.now(),
             "timestamp" : datetime.now() }
         },
@@ -237,6 +262,13 @@ def dream():
         
     logger.info(request.form.get("dream"))
     return dumps({"message":"received"})
+
+@app.route("/updateuser", methods=["POST"])
+def updateuser():
+    if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
+        return jsonify({"message": "ERROR: Unauthorized"}), 401
+    author_id = request.form.get("author_id", type = int)
+    logger.info(author_id)
 
 @app.route("/updatejob", methods=["POST"])
 def updatejob():
@@ -529,7 +561,7 @@ def upload_file(agent_id, job_uuid):
                 queueCollection = client.database.get_collection("queue")
                 results = queueCollection.update_one({
                     "agent_id": agent_id, 
-                    "uuid": job_uuid}, {"$set": {"status": "complete", "filename": filename, "duration":duration}})
+                    "uuid": job_uuid}, {"$set": {"status": "complete", "filename": filename, "duration":duration, "percent": 100}})
                 count = results.modified_count
             if count == 0:
                 return f"cannot find that job."
@@ -598,6 +630,7 @@ def clearevents():
 def placeorder():
     if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
         return jsonify({"message": "ERROR: Unauthorized"}), 401
+    author = request.form.get("author", type=int)
     newrecord = {
         "uuid" : request.form.get("uuid", type=str),
         "parent_uuid" : request.form.get("parent_uuid", type=str),
@@ -616,7 +649,7 @@ def placeorder():
         "cut_ic_pow": request.form.get("cut_ic_pow", type=int),
         "cutn_batches": request.form.get("cutn_batches", type=int),
         "sat_scale": request.form.get("sat_scale", type=float),
-        "author": request.form.get("author", type=int),
+        "author": author,
         "status": "queued",
         "eta": request.form.get("eta", type=float),
         "timestamp": datetime.utcnow()
@@ -624,6 +657,7 @@ def placeorder():
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
         queueCollection.insert_one(newrecord)
+    user_pulse(author)
     return "ok"
 
 @app.route("/search/<regexp>", methods = ["GET"])

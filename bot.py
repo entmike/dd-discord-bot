@@ -367,21 +367,26 @@ async def task_loop():
     
     # Drop any stalled jobs
     
-    # api = f"{BOT_API}/queue/stalled"
-    # logger.info(f"🌍 Getting stalled jobs from '{api}'...")
-    # stalls = requests.get(api).json()
-    # for stall in stalls:
-    #     for channel in botspam_channels:
-    #         channel = discord.utils.get(bot.get_all_channels(), name=channel)
-    #         embed = discord.Embed(
-    #             title="😠 Job Stalled 😠",
-    #             description=f"Job `{stall.get('uuid')}` from <@{stall.get('author')}> was apparently abandoned by `{stall.get('agent_id')}`  Reassigning in queue.",
-    #             color=discord.Colour.orange(),
-    #         )
-    #         await channel.send(embed=embed)
-        #api = f"{BOT_API}/updatejob/{stall.get('uuid')}/"
-        #logger.info(f"🌍 Updating Job '{api}'...")
-        #requests.post(api, data={"status": "queued", "agent_id" : None, "percent" : None, "last_preview" : None}).json()
+    api = f"{BOT_API}/queue/stalled"
+    logger.info(f"🌍 Getting stalled jobs from '{api}'...")
+    stalls = requests.get(api).json()
+    for stall in stalls:
+        for channel in botspam_channels:
+            channel = discord.utils.get(bot.get_all_channels(), name=channel)
+            embed = discord.Embed(
+                title="😠 Job Stalled 😠",
+                description=f"Job `{stall.get('uuid')}` from <@{stall.get('author')}> was apparently abandoned by `{stall.get('agent_id')}`  Reassigning in queue.",
+                color=discord.Colour.orange(),
+            )
+            await channel.send(embed=embed)
+        updateJob({
+            "uuid" : stall.get('uuid'),
+            "status" : "queued",
+            "agent_id" : None,
+            "percent" : None,
+            "last_preview" : None,
+            "timestamp" : datetime.datetime.now()
+        })
     logger.info("end loop")
 
 class MyModal(Modal):
@@ -767,6 +772,7 @@ async def mutate(
         discord.OptionChoice("ViTB16+32, RN50x64", value="rn50x64"),
         discord.OptionChoice("ViTB16+32, ViTL14", value="vitl14"),
         discord.OptionChoice("ViTB16+32, ViTL14x336", value="vitl14x336"),
+        discord.OptionChoice("RN50x64 and ViTL14x336", value="ludicrous"),
     ]),
     clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False),
     cut_ic_pow: discord.Option(int, "CLIP Innercut Power", required=False),
@@ -847,6 +853,7 @@ async def render(
         discord.OptionChoice("ViTB16+32, RN50x64", value="rn50x64"),
         discord.OptionChoice("ViTB16+32, ViTL14", value="vitl14"),
         discord.OptionChoice("ViTB16+32, ViTL14x336", value="vitl14x336"),
+        discord.OptionChoice("RN50x64 and ViTL14x336", value="ludicrous"),
     ]),
     clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False, default=5000),
     cut_ic_pow: discord.Option(int, "CLIP Innercut Power", required=False, default=1),
@@ -1057,11 +1064,11 @@ async def agent_status(channel, messageid):
     embed.set_footer(text = f"Last update: {datetime.datetime.now()}")
     if messageid != None:
         message = await channel.fetch_message(messageid)
-        await message.edit(embed = embed)
-        # await message.edit(f"""```\n{t[:1500]}\n```""")
+        # await message.edit(embed = embed)
+        await message.edit(f"""```\n{t[:1900]}\n```""")
     else:
-        await channel.send(embed = embed)
-        # await message.send(f"""```\n{t[:1900]}\n```""")
+        # await channel.send(embed = embed)
+        await message.send(f"""```\n{t[:1900]}\n```""")
 
 
 if __name__ == "__main__":
