@@ -31,17 +31,17 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 BOT_NAME = os.getenv('BOT_NAME')
 BOT_ICON = os.getenv('BOT_ICON')
 
-DISCORD_SERVER_ID = os.getenv('DISCORD_SERVER_ID')
-DISCORD_DAY_DREAMS = os.getenv('DISCORD_DAY_DREAMS')
-DISCORD_SKETCHES = os.getenv('DISCORD_SKETCHES')
-DISCORD_MUTATIONS = os.getenv('DISCORD_MUTATIONS')
-DISCORD_IMAGES = os.getenv('DISCORD_IMAGES')
-DISCORD_ACTIVE_JOBS = os.getenv('DISCORD_ACTIVE_JOBS')
-DISCORD_WAITING_JOBS = os.getenv('DISCORD_WAITING_JOBS')
-DISCORD_QUEUE_STATS = os.getenv('DISCORD_QUEUE_STATS')
-DISCORD_AGENT_STATS = os.getenv('DISCORD_AGENT_STATS')
-DISCORD_QUEUE_STATS_MSG = os.getenv('DISCORD_QUEUE_STATS_MSG')
-DISCORD_AGENT_STATS_MSG = os.getenv('DISCORD_AGENT_STATS_MSG')
+DISCORD_SERVER_ID = int(os.getenv('DISCORD_SERVER_ID'))
+DISCORD_DAY_DREAMS = int(os.getenv('DISCORD_DAY_DREAMS'))
+DISCORD_SKETCHES = int(os.getenv('DISCORD_SKETCHES'))
+DISCORD_MUTATIONS = int(os.getenv('DISCORD_MUTATIONS'))
+DISCORD_IMAGES = int(os.getenv('DISCORD_IMAGES'))
+DISCORD_ACTIVE_JOBS = int(os.getenv('DISCORD_ACTIVE_JOBS'))
+DISCORD_WAITING_JOBS = int(os.getenv('DISCORD_WAITING_JOBS'))
+DISCORD_QUEUE_STATS = int(os.getenv('DISCORD_QUEUE_STATS'))
+DISCORD_AGENT_STATS = int(os.getenv('DISCORD_AGENT_STATS'))
+DISCORD_QUEUE_STATS_MSG = int(os.getenv('DISCORD_QUEUE_STATS_MSG'))
+DISCORD_AGENT_STATS_MSG = int(os.getenv('DISCORD_AGENT_STATS_MSG'))
 
 STEP_LIMIT = int(os.getenv("STEP_LIMIT", 150))
 PROFANITY_THRESHOLD = float(os.getenv("PROFANITY_THRESHOLD", 0.7))
@@ -1083,7 +1083,7 @@ async def agent_status(channel, messageid):
         await message.edit(f"""```\n{t[:1900]}\n```""")
     else:
         # await channel.send(embed = embed)
-        await message.send(f"""```\n{t[:1900]}\n```""")
+        await channel.send(f"""```\n{t[:1900]}\n```""")
 
 
 if __name__ == "__main__":
