@@ -486,6 +486,7 @@ def progress(agent_id, job_uuid):
             agentCollection.update_one({"agent_id": agent_id}, {"$set": {"gpustats": gpustats}})
             queueCollection = client.database.get_collection("queue")
             job = queueCollection.find_one({"uuid": job_uuid})
+            hwm = 0
             if job:
                 # Calc high watermark in memory
                 if job.get("mem_hwm"):
