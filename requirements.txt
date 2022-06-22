@@ -16,4 +16,3 @@ jsbeautifier
 requests
 Pillow
 gunicorn
-# git+https://github.com/dimitrismistriotis/profanity-check
