@@ -44,7 +44,8 @@ DISCORD_QUEUE_STATS = int(os.getenv("DISCORD_QUEUE_STATS"))
 DISCORD_AGENT_STATS = int(os.getenv("DISCORD_AGENT_STATS"))
 DISCORD_QUEUE_STATS_MSG = int(os.getenv("DISCORD_QUEUE_STATS_MSG"))
 DISCORD_AGENT_STATS_MSG = int(os.getenv("DISCORD_AGENT_STATS_MSG"))
-
+DISCORD_UPLOAD_FILES = bool(os.getenv("DISCORD_UPLOAD_FILES", False))
+UPLOAD_FOLDER= str(os.getenv("UPLOAD_FOLDER", "images"))
 STEP_LIMIT = int(os.getenv("STEP_LIMIT", 150))
 PROFANITY_THRESHOLD = float(os.getenv("PROFANITY_THRESHOLD", 0.7))
 AUTHOR_LIMIT = int(os.getenv("AUTHOR_LIMIT", 2))
@@ -139,8 +140,14 @@ async def queueBroadcast(who, status, author=None, channel=None, label="queue"):
             summary = f"{summary} | [Image](https://discord.com/channels/{DISCORD_SERVER_ID}/{channel_id}/{msgid})"
         embed.add_field(name=f"{job.get('uuid')}", value=summary, inline=False)
     if messageid != None:
-        message = await channel.fetch_message(messageid)
-        await message.edit(embed=embed)
+        try:
+            message = await channel.fetch_message(messageid)
+            await message.edit(embed=embed)
+        except:
+            logger.info(f"{messageid} not found.  Creating new one.")
+            msg = await channel.send(embed=embed)
+            messageid = msg.id
+            requests.post(f"{BOT_API}/serverinfo", headers={"x-dd-bot-token": BOT_TOKEN}, data={"subject": label, "channel": int(channelid), "message": int(messageid)}).json()
     else:
         msg = await channel.send(embed=embed)
         messageid = msg.id
@@ -186,7 +193,7 @@ async def task_loop():
     await queue_status(DISCORD_QUEUE_STATS, DISCORD_QUEUE_STATS_MSG)
     # Agents
     logger.info("Updating Agent Status")
-    await agent_status(DISCORD_AGENT_STATS, DISCORD_AGENT_STATS_MSG)
+    await agent_status()
     # Active
     logger.info("Updating Active Queue")
     await queueBroadcast("all", "processing", None, DISCORD_ACTIVE_JOBS, "active")
@@ -271,8 +278,10 @@ async def task_loop():
                                 msgid = msg.id
                             message = await channel.fetch_message(msgid)
                             if file:
-                                # await message.edit(file=file, view=view, embed=embed)
-                                await message.edit(embed=embed, view=view)
+                                if DISCORD_UPLOAD_FILES:
+                                    await message.edit(file=file, view=view, embed=embed)
+                                else:
+                                    await message.edit(embed=embed, view=view)
                             else:
                                 await message.edit(embed=embed, view=view)
                         except:
@@ -340,13 +349,20 @@ async def task_loop():
                         except:
                             message = None
                         if message:
-                            # await message.edit(view=view, file=file)
-                            await message.edit(embed=embed, view=view)
+                            if DISCORD_UPLOAD_FILES:
+                                # Not sure why, but it fixes images showing up outside of embed
+                                await message.edit(view=view, file=file)
+                                await message.edit(embed=embed)
+                            else:
+                                await message.edit(embed=embed, view=view)
                         else:
-                            # await channel.send(embed=embed, view=view, file=file)
-                            await channel.send(embed=embed, view=view)
+                            logger.info(f"Sending new message to {channel.name}")
+                            await channel.send(embed=embed, view=view, file=file)
                     else:
-                        await channel.send(embed=embed, view=view)
+                        if DISCORD_UPLOAD_FILES:
+                            await channel.send(embed=embed, view=view, file=file)
+                        else:
+                            await channel.send(embed=embed, view=view)
                 except Exception as e:
                     tb = traceback.format_exc()
                     await channel.send(f"💀 Cannot display {completedJob.get('uuid')}\n`{tb}`")
@@ -457,8 +473,10 @@ async def do_refresh(job_uuid):
                     except:
                         message = None
                     if message:
-                        # await message.edit(embed=embed, view=view, file=file)
-                        await message.edit(embed=embed, view=view)
+                        if DISCORD_UPLOAD_FILES:
+                            await message.edit(embed=embed, view=view, file=file)
+                        else:
+                            await message.edit(embed=embed, view=view)
                         logger.info(f"{job_uuid} has been refreshed in message {msgid} on Discord...")
                     # else:
                     #     await channel.send(embed=embed, view=view, file=file)
@@ -474,8 +492,10 @@ async def do_refresh(job_uuid):
 async def display(ctx, job_uuid):
     embed, file, view = retrieve(job_uuid)
     try:
-        # await ctx.respond(embed=embed, view=view, file=file)
-        await ctx.respond(embed=embed, view=view)
+        if DISCORD_UPLOAD_FILES:
+            await ctx.respond(embed=embed, view=view, file=file)
+        else:
+            await ctx.respond(embed=embed, view=view)
     except:
         await ctx.respond(f"💀 Cannot display {job_uuid}")
 
@@ -498,7 +518,7 @@ def retrieve_log(uuid):
         )
         view = discord.ui.View()
         if job.get("log"):
-            file = discord.File(f"images/{job.get('log')}", filename=job.get("log"))
+            file = discord.File(f"{UPLOAD_FOLDER}/{job.get('log')}", filename=job.get("log"))
         else:
             file = None
         return embed, file, view
@@ -540,6 +560,9 @@ def retrieve(uuid):
         color=color,
         fields=[
             discord.EmbedField("Author", f"<@{job.get('author')}>", inline=True),
+            discord.EmbedField("Type", f"`{job.get('render_type')}`", inline=True),
+            discord.EmbedField("Model", f"`{job.get('model')}`", inline=True),
+            discord.EmbedField("Steps", f"`{str(job.get('steps'))}`", inline=True),
             discord.EmbedField("Progress", f"`{str(percent)}%`", inline=True),
             discord.EmbedField("Text Prompt", f"`{job.get('text_prompt')[:500]}`", inline=False),
             discord.EmbedField("Details", details, inline=True)
@@ -560,27 +583,28 @@ def retrieve(uuid):
         ],
     )
     embed.set_author(
-        name=BOT_NAME,
+        name=job.get('uuid'),
         icon_url=BOT_ICON,
     )
-    embed.set_footer(text=f"{job.get('uuid')}")
+    embed.set_footer(text=f"Render time: {str(math.floor(duration))} sec")
 
     view = discord.ui.View()
     pinButton = discord.ui.Button(label="Toggle as Favorite", style=discord.ButtonStyle.green, emoji="📌", custom_id=job.get("uuid"))
     pinButton.callback = pinCallback
-    view.add_item(pinButton)
+    # view.add_item(pinButton)
     preview = job.get("preview")
     fn = ""
     if preview == True:
         fn = f"{uuid}_progress.png"
     if status == "archived" or status == "complete":
         fn = job.get("filename")
-    logger.info(fn)
     if fn != "":
-        # file = discord.File(f"images/{fn}", fn)
-        # file = discord.File(f"images/{fn}", f"{BOT_PUBLIC_API}/image/{uuid}")
-        file = None
-        embed.set_image(url=f"{BOT_PUBLIC_API}/image/{uuid}")
+        if DISCORD_UPLOAD_FILES:
+            file = discord.File(f"{UPLOAD_FOLDER}/{fn}", fn)
+            embed.set_image(url=f"attachment://{fn}")
+        else:
+            file = None
+            embed.set_image(url=f"{BOT_PUBLIC_API}/image/{uuid}")
     else:
         file = None
     return embed, file, view
@@ -845,6 +869,7 @@ async def mutate(
             discord.OptionChoice("Square", value="square"),
             discord.OptionChoice("Tiny Square", value="tiny-square"),
             discord.OptionChoice("Panoramic", value="pano"),
+            discord.OptionChoice("Skyscraper", value="skyscraper"),
         ],
     ),
     model: discord.Option(
@@ -986,6 +1011,7 @@ async def render(
             discord.OptionChoice("Square", value="square"),
             discord.OptionChoice("Tiny Square", value="tiny-square"),
             discord.OptionChoice("Panoramic", value="pano"),
+            discord.OptionChoice("Skyscraper", value="skyscraper"),
         ],
     ),
     model: discord.Option(
@@ -1083,6 +1109,7 @@ async def sketch(
             discord.OptionChoice("Square", value="square"),
             discord.OptionChoice("Tiny Square", value="tiny-square"),
             discord.OptionChoice("Panoramic", value="pano"),
+            discord.OptionChoice("Skyscraper", value="skyscraper"),
         ],
     ),
     clip_guidance_scale: discord.Option(int, "CLIP guidance scale", required=False, default=5000),
@@ -1269,8 +1296,15 @@ async def myhistory(ctx):
     await ctx.respond(f"{BOT_PUBLIC_API}/myhistory/{ctx.author.id}", ephemeral=True)
 
 
-async def agent_status(channel, messageid):
-    channel = bot.get_channel(channel)
+async def agent_status():
+    subject = requests.get(f"{BOT_API}/serverinfo/agentstats").json()
+    if subject:
+        channelid = int(subject["channel"])
+        messageid = int(subject["message"])
+    else:
+        channelid = DISCORD_AGENT_STATS
+
+    channel = bot.get_channel(channelid)
     table = Texttable(160)
     table.set_deco(Texttable.HEADER)
     # 't',  # text
@@ -1310,12 +1344,19 @@ async def agent_status(channel, messageid):
     embed.add_field(name="Agents", value=f"```\n{t[:750]}\n```", inline=False)
     embed.set_footer(text=f"Last update: {datetime.datetime.now()}")
     if messageid != None:
-        message = await channel.fetch_message(messageid)
-        # await message.edit(embed = embed)
-        await message.edit(f"""```\n{t[:1900]}\n```""")
+        try:
+            message = await channel.fetch_message(messageid)
+            await message.edit(f"""```\n{t[:1900]}\n```""")
+        except:
+            logger.info(f"{messageid} not found.  Creating new one.")
+            msg = await channel.send(f"""```\n{t[:1900]}\n```""")
+            messageid = msg.id
+            requests.post(f"{BOT_API}/serverinfo", headers={"x-dd-bot-token": BOT_TOKEN}, data={"subject": "agentstats", "channel": int(channel.id), "message": int(messageid)}).json()
     else:
         # await channel.send(embed = embed)
-        await channel.send(f"""```\n{t[:1900]}\n```""")
+        msg = await channel.send(f"""```\n{t[:1900]}\n```""")
+        messageid = msg.id
+        requests.post(f"{BOT_API}/serverinfo", headers={"x-dd-bot-token": BOT_TOKEN}, data={"subject": "agentstats", "channel": int(channel.id), "message": int(messageid)}).json()
 
 
 if __name__ == "__main__":

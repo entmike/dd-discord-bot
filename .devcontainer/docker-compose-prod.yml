@@ -9,7 +9,7 @@ services:
     - 5000:8080
     volumes:
       - ..:/workspace:cached
-    command: /bin/bash -c "source /workspace/.venv/dd-discord-bot/bin/activate && cd /workspace && pip install -r requirements.txt && python serve.py"
+    command: /bin/bash -c "source /workspace/.venv/dd-discord-bot/bin/activate && cd /workspace && pip install -r requirements.txt && gunicorn -b 0.0.0.0:8080 --workers=5 app:app"
   bot:
     build:
       context: .
@@ -19,12 +19,18 @@ services:
     command: /bin/bash -c "source /workspace/.venv/dd-discord-bot/bin/activate && cd /workspace && pip install -r requirements.txt && python bot.py"
 
   mongodb:
-    image: mongo:latest
+    image: mongo:4.4.5-bionic
     hostname: mongodb
     restart: unless-stopped
+    # environment:
+    #   - MONGO_INITDB_ROOT_USERNAME=
+    #   - MONGO_INITDB_ROOT_PASSWORD=
+    ports:
+    - 7171:27017
     volumes:
       - /home/ec2-user/appdata/dd-bot-db/db:/data/db
-      - /home/ec2-user/appdata/dd-bot-db/config:/data/configdb
+    #   - /home/ec2-user/appdata/dd-bot-db/mongod.conf:/etc/mongod.conf
+    # command: ["--auth"]
     # As in the "app" service, use "forwardPorts" in **devcontainer.json** to forward an app port locally.
 networks:
   default:
