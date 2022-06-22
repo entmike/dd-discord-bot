@@ -14,4 +14,5 @@ waitress
 texttable
 jsbeautifier
 requests
+Pillow
 # git+https://github.com/dimitrismistriotis/profanity-check

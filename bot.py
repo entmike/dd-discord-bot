@@ -27,8 +27,10 @@ warnings.filterwarnings("ignore")
 load_dotenv()
 
 BOT_API = os.getenv('BOT_API')
+BOT_PUBLIC_API = os.getenv('BOT_PUBLIC_API')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 BOT_NAME = os.getenv('BOT_NAME')
+BOT_WEBSITE = os.getenv('BOT_WEBSITE')
 BOT_ICON = os.getenv('BOT_ICON')
 
 DISCORD_SERVER_ID = int(os.getenv('DISCORD_SERVER_ID'))
@@ -47,7 +49,9 @@ STEP_LIMIT = int(os.getenv("STEP_LIMIT", 150))
 PROFANITY_THRESHOLD = float(os.getenv("PROFANITY_THRESHOLD", 0.7))
 AUTHOR_LIMIT = int(os.getenv("AUTHOR_LIMIT", 2))
 
-bot = discord.Bot(debug_guilds=[DISCORD_SERVER_ID])  # specify the guild IDs in debug_guilds
+intents = discord.Intents.default()
+intents.members = True
+bot = discord.Bot(debug_guilds=[DISCORD_SERVER_ID], intents = intents)  # specify the guild IDs in debug_guilds
 arr = []
 agents = []
 ticks = 0
@@ -59,6 +63,19 @@ def updateJob(data):
     api = f"{BOT_API}/updatejob"
     logger.info(f"🌍 Updating Job '{api}'...")
     return requests.post(api, data=data, headers={"x-dd-bot-token":BOT_TOKEN}).json()
+
+def updateUser(data):
+    """
+    Updates a User by `id` via API call.
+    """
+    api = f"{BOT_API}/updateuser"
+    logger.info(f"🌍 Updating User '{api}'...")
+    logger.info(data)
+    try:
+        return requests.post(api, data=data, headers={"x-dd-bot-token":BOT_TOKEN}).json()
+    except:
+        logger.info("update user bugged")
+        pass
 
 def lazy(obj, field):
     if obj.has_key(field):
@@ -525,7 +542,7 @@ def retrieve(uuid):
     if status == "queued":
         color = discord.Colour.blurple()
     # logger.info(f"{uuid} - {status}")
-    details = f"[Job]({BOT_API}/job/{job.get('uuid')}) | [Config]({BOT_API}/config/{job.get('uuid')})"
+    details = f"[Job]({BOT_API}/job/{job.get('uuid')}) | [Config]({BOT_API}/config/{job.get('uuid')}) | [Web]({BOT_WEBSITE}/piece/{job.get('uuid')})"
     if job.get("parent_uuid"):
         details = f"{details} | Parent: `{job.get('parent_uuid')}`"
     embed = discord.Embed(
@@ -534,7 +551,7 @@ def retrieve(uuid):
         fields= [
             discord.EmbedField("Author", f"<@{job.get('author')}>", inline=True),
             discord.EmbedField("Progress", f"`{str(percent)}%`", inline=True),
-            discord.EmbedField("Text Prompt", f"`{job.get('text_prompt')}`", inline=False),
+            discord.EmbedField("Text Prompt", f"`{job.get('text_prompt')[:500]}`", inline=False),
             discord.EmbedField("Details", details, inline=True)
             # discord.EmbedField("Steps", f"`{completedJob.get('steps')}`", inline=True),
             # discord.EmbedField("CLIP Model", f"`{completedJob.get('model')}`", inline=True),
@@ -664,12 +681,26 @@ async def ping(ctx):  # a slash command will be created with the name "ping"
 @bot.event
 async def on_ready():
     logger.info(f"{bot.user} is ready and online!")
+    members = await bot.guilds[0].fetch_members(limit = 1000).flatten()
+    
+    # for member in members:
+    #     logger.info(member.id)
+    #     logger.info(member.name)
+    #     updateUser({
+    #         "user_id": int(member.id),
+    #         "user_name" : member.name,
+    #         "display_name" : member.display_name,
+    #         "discriminator" : member.discriminator,
+    #         "nick" : member.nick
+    #     })
+
+        
     task_loop.start()  # important to start the loop
 
 
 @bot.event
 async def on_member_join(member):
-    await member.send(f"Welcome to the server, {member.mention}! Enjoy your stay here.")
+    await member.send(f"Welcome to the server, {member.mention}! Enjoy your stay here.  Type `/render` to get started.")
 
 async def do_render(ctx, render_type, text_prompt, steps, shape, model, clip_guidance_scale, cut_ic_pow, sat_scale, clamp_max, set_seed, symmetry, symmetry_loss_scale, cut_schedule, diffusion_model, eta, cutn_batches, parent_uuid):
     reject = False
@@ -1089,5 +1120,4 @@ async def agent_status(channel, messageid):
 if __name__ == "__main__":
     print(discord.__version__)
     from discord.ext import tasks, commands
-
     bot.run(os.getenv("DISCORD_TOKEN"))

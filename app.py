@@ -1,3 +1,4 @@
+from io import BytesIO, StringIO
 import jsbeautifier
 import os, sys
 from webbrowser import get
@@ -12,6 +13,7 @@ from bson.json_util import dumps
 import uuid
 import json
 from loguru import logger
+from PIL import Image
 
 # https://iq-inc.com/wp-content/uploads/2021/02/AndyRelativeImports-300x294.jpg
 sys.path.append(".")
@@ -57,12 +59,12 @@ def allowed_file(filename):
 def log(message, title="Message"):
     with get_database() as client:
         logTable = client.database.get_collection("logs")
-        logTable.insert_one({"timestamp": datetime.now(), "message": message, "title": title, "ack": False, "uuid": str(uuid.uuid4())})
+        logTable.insert_one({"timestamp": str(datetime.now()), "message": message, "title": title, "ack": False, "uuid": str(uuid.uuid4())})
 
 def event(event):
     with get_database() as client:
         eventTable = client.database.get_collection("events")
-        eventTable.insert_one({"timestamp": datetime.now(), "ack": False, "uuid": str(uuid.uuid4()), "event" : event})
+        eventTable.insert_one({"timestamp": str(datetime.now()), "ack": False, "uuid": str(uuid.uuid4()), "event" : event})
     # logger.info(f"Event logged: {event}")
 
 @app.route("/toggle_pin/<user_id>/<uuid>/")
@@ -92,6 +94,30 @@ def user_pulse(author_id):
             {"user_id": author_id},
             {"$set": {"last_seen": datetime.now()}},
         upsert = True)
+
+@app.route("/random/<amount>")
+def random_images(amount):
+    with get_database() as client:
+        r = client.database.get_collection("queue").aggregate([
+            { "$match": {'status':'archived'} },
+            { "$sample": {"size" : int(amount)} }
+        ])
+        return dumps(r)
+
+@app.route("/recent/<amount>")
+def recent_images(amount):
+    with get_database() as client:
+        r = client.database.get_collection("queue").find({"$query": {'status':'archived'}, "$orderby": {"timestamp": -1}}).limit(int(amount))
+        return dumps(r)
+
+@app.route("/getsince/<seconds>", methods=["GET"])
+def getsince(seconds):
+    since = datetime.now() - timedelta(seconds=int(seconds))
+    q = {"status": "archived", "last_preview" : {"$gt":since}}
+    with get_database() as client:
+        query = {"$query": q, "$orderby": {"timestamp": -1}}
+        queue = client.database.get_collection("queue").find(query)
+        return dumps(queue)
 
 @app.route("/queue/", methods=["GET"], defaults={'status': 'all'})
 @app.route("/queue/<status>/")
@@ -163,7 +189,7 @@ def dreams():
     with get_database() as client:
         dreams = client.database.get_collection("userdreams").find({
             "$query" : {},
-            "$orderby": {"timestamp": 1}
+            "$orderby": {"count":1}
         })
         return dumps(dreams)
 
@@ -179,16 +205,16 @@ def getOldestDream():
         dream = dreamCollection.find_one({
             "$query" : {
                 "dream": {"$exists": True}, 
-                "$or" : [
-                    {"count":{"$lt": 20}},
-                    {"count":{"$exists": False}}
-                ]
+                # "$or" : [
+                #     {"count":{"$lt": 30}},
+                #     {"count":{"$exists": False}}
+                # ]
             },
-            "$orderby": {"last_used": 1}
+            "$orderby": {"count":1}
         })
         if dream:
             if(dream.get("count")):
-                count = dream.get("count") + 1
+                count = int(dream.get("count")) + 1
             else:
                 count = 1
             dreamCollection.update_one(
@@ -208,7 +234,7 @@ def awaken(author_id):
     with get_database() as client:
         dreamCollection = client.database.get_collection("userdreams")
         dreamCollection.delete_many({"dream": {"$exists": False}})
-        dreamCollection.delete_one({"author_id" : author_id})
+        dreamCollection.delete_one({"author_id" : int(author_id)})
         return dumps({"message": f"Dream for {author_id} deleted."})
 
 @app.route("/serverinfo", methods=["POST"])
@@ -221,7 +247,7 @@ def serverinfo_post():
             "subject": request.form.get("subject"),
             "channel": int(request.form.get("channel")),
             "message": int(request.form.get("message")),
-            "timestamp" : datetime.now()
+            "timestamp" : str(datetime.now())
         }
         logger.info(doc)
         postsCollection.update_one(
@@ -250,7 +276,7 @@ def dream():
     with get_database() as client:
         dreamCollection = client.database.get_collection("userdreams")
         dreamCollection.update_one(
-        { "author_id": request.form.get("author_id") },
+        { "author_id": request.form.get("author_id", type=int) },
         {"$set":
             { "author_id": request.form.get("author_id", type=int),
             "dream" : request.form.get("dream"),
@@ -263,12 +289,32 @@ def dream():
     logger.info(request.form.get("dream"))
     return dumps({"message":"received"})
 
+@app.route("/users")
+def users():
+    with get_database() as client:
+        userCollection = client.database.get_collection("users")
+        users = userCollection.find({})
+        logger.info(users)
+        return dumps(users)
+
 @app.route("/updateuser", methods=["POST"])
 def updateuser():
     if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
         return jsonify({"message": "ERROR: Unauthorized"}), 401
-    author_id = request.form.get("author_id", type = int)
-    logger.info(author_id)
+    user_id = request.form.get("user_id", type = int)
+    user_name = request.form.get("user_name")
+    with get_database() as client:
+        userCollection = client.database.get_collection("users")
+        userCollection.update_one({"user_id" :user_id},{
+            "$set":{
+                "user_name": user_name,
+                "display_name" : request.form.get("display_name"),
+                "discriminator" : request.form.get("discriminator"),
+                "nick" : request.form.get("nick")
+            }
+        },
+        upsert = True)
+    return dumps({"success": True})
 
 @app.route("/updatejob", methods=["POST"])
 def updatejob():
@@ -393,11 +439,34 @@ def config(job_uuid):
     except:
         return f"Could not locate {filename}.  This might be because the render has not completed yet.  Or because Mike sucks."
 
+def serve_pil_image(pil_img):
+    img_io = BytesIO()
+    pil_img.save(img_io, 'JPEG', quality=70)
+    img_io.seek(0)
+    return send_file(img_io, mimetype='image/jpeg')
+
+@app.route("/thumbnail/<job_uuid>", methods=["GET"], defaults={'size': 128})
+@app.route("/thumbnail/<job_uuid>/<size>", methods=["GET"])
+def thumbnail(job_uuid, size):
+    try:
+        filename = f"{job_uuid}0_0.png"
+        fn = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        img = Image.open(fn)
+        img.thumbnail((int(size),int(size)), Image.ANTIALIAS)
+        return serve_pil_image(img)
+    except Exception as e:
+        return f"Could not locate {filename}.  This might be because the render has not completed yet.  Or because the job failed.  Or check your job uuid.  Or a gremlin ate the image.  Probably the gremlin.\n{e}"
+
 @app.route("/image/<job_uuid>", methods=["GET"])
 def image(job_uuid):
     try:
         filename = f"{job_uuid}0_0.png"
         fn = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        from os.path import exists
+        if not exists(fn):
+            filename = f"{job_uuid}_progress.png"
+            fn = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        
         return send_file(fn, mimetype='image/png')
     except:
         return f"Could not locate {filename}.  This might be because the render has not completed yet.  Or because the job failed.  Or check your job uuid.  Or a gremlin ate the image.  Probably the gremlin."
@@ -653,7 +722,7 @@ def placeorder():
         "author": author,
         "status": "queued",
         "eta": request.form.get("eta", type=float),
-        "timestamp": datetime.utcnow()
+        "timestamp": str(datetime.utcnow())
     }
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
