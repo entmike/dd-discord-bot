@@ -74,12 +74,7 @@ def updateUser(data):
     api = f"{BOT_API}/updateuser"
     logger.info(f"🌍 Updating User '{api}'...")
     logger.info(data)
-    try:
-        return requests.post(api, data=data, headers={"x-dd-bot-token": BOT_TOKEN}).json()
-    except:
-        logger.info("update user bugged")
-        pass
-
+    return requests.post(api, data=data, headers={"x-dd-bot-token": BOT_TOKEN}).json()
 
 def lazy(obj, field):
     if obj.has_key(field):
@@ -713,16 +708,23 @@ async def on_ready():
     logger.info(f"{bot.user} is ready and online!")
     members = await bot.guilds[0].fetch_members(limit=1000).flatten()
 
-    # for member in members:
-    #     logger.info(member.id)
-    #     logger.info(member.name)
-    #     updateUser({
-    #         "user_id": int(member.id),
-    #         "user_name" : member.name,
-    #         "display_name" : member.display_name,
-    #         "discriminator" : member.discriminator,
-    #         "nick" : member.nick
-    #     })
+    for member in members:
+        logger.info(member.id)
+        logger.info(member.name)
+        av = member.avatar
+        if av:
+            uri = av.url
+        else:
+            uri = ""
+        updateUser({
+            "user_id": int(member.id),
+            "user_name" : member.name,
+            "display_name" : member.display_name,
+            "discriminator" : member.discriminator,
+            "nick" : member.nick,
+            "avatar" : uri,
+            #"display_avatar" : member.display_avatar
+        })
 
     task_loop.start()  # important to start the loop
 

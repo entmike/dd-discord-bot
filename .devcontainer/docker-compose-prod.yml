@@ -9,7 +9,7 @@ services:
     - 5000:8080
     volumes:
       - ..:/workspace:cached
-    command: /bin/bash -c "source /workspace/.venv/dd-discord-bot/bin/activate && cd /workspace && pip install -r requirements.txt && gunicorn -b 0.0.0.0:8080 --workers=5 app:app"
+    command: /bin/bash -c "source /workspace/.venv/dd-discord-bot/bin/activate && cd /workspace && pip install -r requirements.txt && gunicorn -b 0.0.0.0:8080 --workers=25 --threads 4 --backlog 2048 --worker-connections 3000 app:app"
   bot:
     build:
       context: .

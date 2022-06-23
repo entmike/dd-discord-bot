@@ -97,20 +97,78 @@ def user_pulse(author_id):
         agentCollection = client.database.get_collection("users")
         agentCollection.update_one({"user_id": author_id}, {"$set": {"last_seen": datetime.now()}}, upsert=True)
 
+@app.route("/recent/<amount>")
+def recent_images2(amount):
+    with get_database() as client:
+        r = client.database.get_collection("queue").aggregate([
+            {"$match": {"status": "archived"}},
+            {"$lookup" : {
+                "from":"users",
+                "localField" : "author",
+                "foreignField" : "user_id",
+                "as" : "userdets"
+            }},
+            {"$unwind": "$userdets"},
+            {"$sort": {"timestamp": -1}},
+            {"$limit" : int(amount)},
+            { "$addFields" :
+                {
+                    "userdets.user_str": {"$toString": "$userdets.user_id"}
+                }
+            }
+        ])
+        return dumps(r)
 
 @app.route("/random/<amount>")
 def random_images(amount):
     with get_database() as client:
-        r = client.database.get_collection("queue").aggregate([{"$match": {"status": "archived"}}, {"$sample": {"size": int(amount)}}])
+        r = client.database.get_collection("queue").aggregate([
+            {"$match": {"status": "archived"}},
+            {"$sample": {"size": int(amount)}},
+            {"$lookup" : {
+                "from":"users",
+                "localField" : "author",
+                "foreignField" : "user_id",
+                "as" : "userdets"
+            }},
+            {"$unwind": "$userdets"},
+            { "$addFields" :
+                {
+                    "userdets.user_str": {"$toString": "$userdets.user_id"}
+                }
+            }
+        ])
         return dumps(r)
 
-
-@app.route("/recent/<amount>")
-def recent_images(amount):
+@app.route("/userfeed/<user_id>/<amount>")
+def userfeed(user_id, amount):
     with get_database() as client:
-        r = client.database.get_collection("queue").find({"$query": {"status": "archived"}, "$orderby": {"timestamp": -1}}).limit(int(amount))
+        r = client.database.get_collection("queue").aggregate([
+            { "$addFields" : 
+                {
+                    "author_id": {"$toLong": "$author"}
+                },
+            },
+            {"$match": {
+                "status": "archived",
+                "author_id" : int(user_id)
+            }},
+            {"$lookup" : {
+                "from":"users",
+                "localField" : "author_id",
+                "foreignField" : "user_id",
+                "as" : "userdets"
+            }},
+            {"$unwind": "$userdets"}, 
+            {"$sort": {"timestamp": -1}},
+            {"$limit" : int(amount)},
+            { "$addFields" :
+                {
+                    "userdets.user_str": {"$toString": "$userdets.user_id"}
+                }
+            }
+        ])
         return dumps(r)
-
 
 @app.route("/getsince/<seconds>", methods=["GET"])
 def getsince(seconds):
@@ -209,6 +267,7 @@ def getOldestDream():
             {
                 "$query": {
                     "dream": {"$exists": True},
+                    # "author_id" : {"$ne": 823976252154314782}
                     # "$or" : [
                     #     {"count":{"$lt": 30}},
                     #     {"count":{"$exists": False}}
@@ -307,6 +366,7 @@ def updateuser():
                     "display_name": request.form.get("display_name"),
                     "discriminator": request.form.get("discriminator"),
                     "nick": request.form.get("nick"),
+                    "avatar": request.form.get("avatar"),
                 }
             },
             upsert=True,
@@ -362,14 +422,27 @@ def myhistory(author_id, status):
         jobs = queueCollection.find(q)
         return jsonify(json.loads(dumps(jobs)))
 
-
 @app.route("/job/<job_uuid>", methods=["GET", "DELETE"])
 def job(job_uuid):
     if request.method == "GET":
         with get_database() as client:
             queueCollection = client.database.get_collection("queue")
-            job = queueCollection.find_one({"uuid": job_uuid})
-            return dumps(job)
+            job = queueCollection.aggregate( [
+                {"$match" : {"uuid": job_uuid}},
+                {"$lookup" : {
+                    "from":"users",
+                    "localField" : "author",
+                    "foreignField" : "user_id",
+                    "as" : "userdets"
+                }},
+                {"$unwind": "$userdets"},
+                {"$unwind": "$uuid"},
+                { "$addFields" :{
+                    "userdets.user_str": {"$toString": "$userdets.user_id"}
+                }
+            }
+            ])
+            return dumps(list(job)[0])
     if request.method == "DELETE":
         if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
             return jsonify({"message": "ERROR: Unauthorized"}), 401
@@ -757,11 +830,15 @@ def takeorder(agent_id):
                 return dumps({"message ": f"You already have a job.  (Job '{jobs.get('uuid')}')", "uuid": jobs.get("uuid"), "details": json.loads(dumps(jobs)), "success": True})
             else:
                 # Check for sketches first
-                query = {"status": "queued", "render_type": "sketch", "model": model}
+                query = {"status": "queued", "render_type": "sketch", "model": model, 
+                # "author" : {"$ne": 823976252154314782}
+                }
                 queueCount = queueCollection.count_documents(query)
                 logger.info(f"{queueCount} sketches in queue.")
                 if queueCount == 0:
-                    query = {"status": "queued", "model": model}
+                    query = {"status": "queued", "model": model, 
+                    # "author" : {"$ne": 823976252154314782}
+                    }
                     queueCount = queueCollection.count_documents(query)
                     logger.info(f"{queueCount} renders in queue.")
 
