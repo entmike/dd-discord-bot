@@ -97,25 +97,35 @@ def user_pulse(author_id):
         agentCollection = client.database.get_collection("users")
         agentCollection.update_one({"user_id": author_id}, {"$set": {"last_seen": datetime.now()}}, upsert=True)
 
-@app.route("/recent/<amount>")
-def recent_images2(amount):
+@app.route("/recent/<amount>", methods=["GET"], defaults={"page": 1})
+@app.route("/recent/<amount>/<page>")
+def recent_images2(amount, page):
     with get_database() as client:
         r = client.database.get_collection("queue").aggregate([
             {"$match": {"status": "archived"}},
+            { "$addFields" : {
+                "str_timestamp" : {"$toString" : "$timestamp"}
+                }
+            },
+            { "$addFields" : {
+                "dt_timestamp" : {"$dateFromString" : {"dateString":"$str_timestamp"}}
+                }
+            },
+            {"$sort": {"dt_timestamp": -1}},
             {"$lookup" : {
                 "from":"users",
                 "localField" : "author",
                 "foreignField" : "user_id",
                 "as" : "userdets"
             }},
-            {"$unwind": "$userdets"},
-            {"$sort": {"timestamp": -1}},
+            {"$skip" : (int(page)-1) * int(amount)},
             {"$limit" : int(amount)},
+            {"$unwind": "$userdets"},
             { "$addFields" :
                 {
                     "userdets.user_str": {"$toString": "$userdets.user_id"}
                 }
-            }
+            },
         ])
         return dumps(r)
 
@@ -140,8 +150,9 @@ def random_images(amount):
         ])
         return dumps(r)
 
-@app.route("/userfeed/<user_id>/<amount>")
-def userfeed(user_id, amount):
+@app.route("/userfeed/<user_id>/<amount>", methods=["GET"], defaults={"page": 1})
+@app.route("/userfeed/<user_id>/<amount>/<page>")
+def userfeed(user_id, amount, page):
     with get_database() as client:
         r = client.database.get_collection("queue").aggregate([
             { "$addFields" : 
@@ -149,10 +160,21 @@ def userfeed(user_id, amount):
                     "author_id": {"$toLong": "$author"}
                 },
             },
+            { "$addFields" : {
+                "str_timestamp" : {"$toString" : "$timestamp"}
+                }
+            },
+            { "$addFields" : {
+                "dt_timestamp" : {"$dateFromString" : {"dateString":"$str_timestamp"}}
+                }
+            },
             {"$match": {
                 "status": "archived",
                 "author_id" : int(user_id)
             }},
+            {"$sort": {"dt_timestamp": -1}},
+            {"$skip" : (int(page)-1) * int(amount)},
+            {"$limit" : int(amount)},
             {"$lookup" : {
                 "from":"users",
                 "localField" : "author_id",
@@ -160,8 +182,6 @@ def userfeed(user_id, amount):
                 "as" : "userdets"
             }},
             {"$unwind": "$userdets"}, 
-            {"$sort": {"timestamp": -1}},
-            {"$limit" : int(amount)},
             { "$addFields" :
                 {
                     "userdets.user_str": {"$toString": "$userdets.user_id"}
