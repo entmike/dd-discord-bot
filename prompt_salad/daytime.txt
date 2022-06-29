@@ -11,6 +11,8 @@ early evening
 dusk
 evening
 late evening
+darkening
+nightfall
 night
 midnight
 twilight
