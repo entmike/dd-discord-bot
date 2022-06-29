@@ -1,0 +1,18 @@
+early morning
+dawn
+morning
+late morning
+noon
+midday
+daylight
+afternoon
+late afternoon
+early evening
+dusk
+evening
+late evening
+night
+midnight
+twilight
+sunrise
+sunset
