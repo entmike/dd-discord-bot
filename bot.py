@@ -44,7 +44,7 @@ DISCORD_QUEUE_STATS = int(os.getenv("DISCORD_QUEUE_STATS"))
 DISCORD_AGENT_STATS = int(os.getenv("DISCORD_AGENT_STATS"))
 DISCORD_QUEUE_STATS_MSG = int(os.getenv("DISCORD_QUEUE_STATS_MSG"))
 DISCORD_AGENT_STATS_MSG = int(os.getenv("DISCORD_AGENT_STATS_MSG"))
-DISCORD_UPLOAD_FILES = bool(os.getenv("DISCORD_UPLOAD_FILES", False))
+DISCORD_UPLOAD_FILES = bool(os.getenv("DISCORD_UPLOAD_FILES", True))
 UPLOAD_FOLDER= str(os.getenv("UPLOAD_FOLDER", "images"))
 STEP_LIMIT = int(os.getenv("STEP_LIMIT", 150))
 PROFANITY_THRESHOLD = float(os.getenv("PROFANITY_THRESHOLD", 0.7))
@@ -64,8 +64,13 @@ def updateJob(data):
     """
     api = f"{BOT_API}/updatejob"
     logger.info(f"🌍 Updating Job '{api}'...")
-    return requests.post(api, data=data, headers={"x-dd-bot-token": BOT_TOKEN}).json()
-
+    try:
+        r = requests.post(api, data=data, headers={"x-dd-bot-token": BOT_TOKEN}, timeout=10).json()
+        logger.info("Job updated.")
+    except:
+        logger.info("Update Job timed out.")
+        r = None
+    return r
 
 def updateUser(data):
     """
@@ -164,7 +169,8 @@ async def queue_status(channel=None, messageid=None):
     summary = f"""
     - ⚒️ Running: `{queuestats['processingCount']}`
     - ⌛ Waiting: `{queuestats['queuedCount']}`
-    - 🖼️ Completed `{queuestats['renderedCount']}`
+    - 🖼️ Completed `{queuestats['completedCount']}`
+    - 🖼️ Archived `{queuestats['renderedCount']}`
     - 🪲 Rejected `{queuestats['rejectedCount']}`
     """
     embed.add_field(name="Queue Stats", value=summary, inline=False)
@@ -200,6 +206,9 @@ async def task_loop():
     api = f"{BOT_API}/events"
     logger.info(f"🌍 Getting events from '{api}'...")
     events = requests.get(api, headers={"x-dd-bot-token": BOT_TOKEN}).json()
+    logger.info(f"🌍 Clearing events from '{api}'...")
+    api = f"{BOT_API}/clearevents"
+    requests.get(api, headers={"x-dd-bot-token": BOT_TOKEN})
 
     logger.info(f"Processing {len(events)} events...")
     for event in events:
@@ -216,76 +225,76 @@ async def task_loop():
         event_type = event.get("event")["type"]
         if event_type == "progress" or event_type == "preview":
             job_uuid = event.get("event")["job_uuid"]
-            logger.info(job_uuid)
-            embed, file, view = retrieve(job_uuid)
-            if embed:
-                logger.info(f"Progress Update found for {job_uuid}")
-                api = f"{BOT_API}/job/{job_uuid}"
-                # logger.info(f"🌍 Getting job from '{api}'...")
-                job = requests.get(api).json()
-                if job.get("last_preview"):
-                    # logger.info(type(job.get("last_preview")))
-                    if type(job.get("last_preview")) is str:
-                        strdate = job.get("last_preview")
-                        last_preview = datetime.datetime.strptime(strdate, "%Y-%m-%d %H:%M:%S.%f")
-                    else:
-                        strdate = job.get("last_preview")["$date"]
-                        try:
-                            last_preview = datetime.datetime.strptime(strdate, "%Y-%m-%dT%H:%M:%S.%fZ")
-                        except:
-                            last_preview = datetime.datetime.strptime(strdate, "%Y-%m-%dT%H:%M:%SZ")
+            # logger.info(job_uuid)
+            # logger.info(f"Progress Update found for {job_uuid}")
+            api = f"{BOT_API}/job/{job_uuid}"
+            # logger.info(f"🌍 Getting job from '{api}'...")
+            job = requests.get(api).json()
+            if job.get("last_preview"):
+                # logger.info(type(job.get("last_preview")))
+                if type(job.get("last_preview")) is str:
+                    strdate = job.get("last_preview")
+                    last_preview = datetime.datetime.strptime(strdate, "%Y-%m-%d %H:%M:%S.%f")
                 else:
-                    last_preview = None
-                # last_preview = datetime.datetime(job.get("last_preview")["$date"])
+                    strdate = job.get("last_preview")["$date"]
+                    try:
+                        last_preview = datetime.datetime.strptime(strdate, "%Y-%m-%dT%H:%M:%S.%fZ")
+                    except:
+                        last_preview = datetime.datetime.strptime(strdate, "%Y-%m-%dT%H:%M:%SZ")
+            else:
+                last_preview = None
+            # last_preview = datetime.datetime(job.get("last_preview")["$date"])
+            toosoon = False
+            if last_preview == None:
                 toosoon = False
-                if last_preview == None:
-                    toosoon = False
-                else:
-                    n = datetime.datetime.now()
-                    duration = n - last_preview
-                    # logger.info(duration)
-                    if duration.total_seconds() < 30:
-                        toosoon = True
+            else:
+                n = datetime.datetime.now()
+                duration = n - last_preview
+                # logger.info(duration)
+                if duration.total_seconds() < 60:
+                    toosoon = True
                 if job:
                     if job.get("status") == "processing" and toosoon == False:
-                        logger.info(f"⬆️ Updating progress in discord for {job.get('uuid')}")
-                        render_type = job.get("render_type")
-                        if render_type is None:
-                            render_type = "render"
-                        if render_type == "sketch":
-                            channel = "sketches"
-                        if render_type == "render":
-                            channel = "images"
-                        if render_type == "mutate":
-                            channel = "mutations"
-                        if render_type == "dream":
-                            channel = "day-dreams"
+                        updateJob({"uuid": job_uuid, "last_preview": datetime.datetime.now()})
+                        embed, file, view = retrieve(job_uuid)
+                        if embed:
+                            logger.info(f"⬆️ Updating progress in discord for {job.get('uuid')}")
+                            render_type = job.get("render_type")
+                            if render_type is None:
+                                render_type = "render"
+                            if render_type == "sketch":
+                                channel = "sketches"
+                            if render_type == "render":
+                                channel = "images"
+                            if render_type == "mutate":
+                                channel = "mutations"
+                            if render_type == "dream":
+                                channel = "day-dreams"
 
-                        logger.info(f"🤩 {channel}")
-                        channel = discord.utils.get(bot.get_all_channels(), name=channel)
-                        # logger.info(f"Updating message {job.get('progress_msg')}...")
-                        try:
-                            if job.get("progress_msg"):
-                                msgid = job.get("progress_msg")
-                            else:
-                                msg = await channel.send(embed=embed, view=view)
-                                updateJob({"uuid": job.get("uuid"), "progress_msg": msg.id})
-                                msgid = msg.id
-                            message = await channel.fetch_message(msgid)
-                            if file:
-                                if DISCORD_UPLOAD_FILES:
-                                    await message.edit(file=file, view=view, embed=embed)
+                            logger.info(f"🤩 {channel}")
+                            channel = discord.utils.get(bot.get_all_channels(), name=channel)
+                            # logger.info(f"Updating message {job.get('progress_msg')}...")
+                            try:
+                                if job.get("progress_msg"):
+                                    msgid = job.get("progress_msg")
+                                else:
+                                    msg = await channel.send(embed=embed, view=view)
+                                    updateJob({"uuid": job.get("uuid"), "progress_msg": msg.id})
+                                    msgid = msg.id
+                                message = await channel.fetch_message(msgid)
+                                if file:
+                                    if DISCORD_UPLOAD_FILES:
+                                        await message.edit(file=file, view=view, embed=embed)
+                                    else:
+                                        await message.edit(embed=embed, view=view)
                                 else:
                                     await message.edit(embed=embed, view=view)
-                            else:
-                                await message.edit(embed=embed, view=view)
-                        except:
-                            # logger.error(f"Could not update message {job.get('progress_msg')}")
-                            pass
-                        updateJob({"uuid": job_uuid, "last_preview": datetime.datetime.now()})
+                            except:
+                                # logger.error(f"Could not update message {job.get('progress_msg')}")
+                                pass
             # Acknowledge (delete) event
-            api = f"{BOT_API}/ack_event/{event.get('uuid')}"
-            requests.get(api, headers={"x-dd-bot-token": BOT_TOKEN}).json()
+            # api = f"{BOT_API}/ack_event/{event.get('uuid')}"
+            # requests.get(api, headers={"x-dd-bot-token": BOT_TOKEN}).json()
 
     # Display any new messages
     api = f"{BOT_API}/logs/"
@@ -317,8 +326,9 @@ async def task_loop():
     if len(completedJobs) == 0:
         logger.info("No completed jobs.")
     else:
+        logger.info(f"{len(completedJobs)} found...")
         for completedJob in completedJobs:
-            logger.info(f"Found completed job: Render Type: {completedJob.get('render_type')}")
+            logger.info(f"Found completed job: {completedJob.get('uuid')} | Render Type: {completedJob.get('render_type')}")
 
             render_type = completedJob.get("render_type")
 
@@ -336,8 +346,8 @@ async def task_loop():
 
             for channel in channels:
                 channel = discord.utils.get(bot.get_all_channels(), name=channel)
-                embed, file, view = retrieve(completedJob.get("uuid"))
                 try:
+                    embed, file, view = retrieve(completedJob.get("uuid"))
                     if completedJob.get("progress_msg"):
                         try:
                             message = await channel.fetch_message(completedJob.get("progress_msg"))
@@ -346,8 +356,8 @@ async def task_loop():
                         if message:
                             if DISCORD_UPLOAD_FILES:
                                 # Not sure why, but it fixes images showing up outside of embed
-                                await message.edit(view=view, file=file)
-                                await message.edit(embed=embed)
+                                await message.edit(view=view, file=file, embed=embed)
+                                # await message.edit(embed=embed)
                             else:
                                 await message.edit(embed=embed, view=view)
                         else:
@@ -412,6 +422,7 @@ async def task_loop():
             )
             await channel.send(embed=embed)
         updateJob({"uuid": stall.get("uuid"), "status": "queued", "agent_id": None, "percent": None, "last_preview": None, "timestamp": datetime.datetime.now()})
+     # Drop any events for performance
     logger.info("end loop")
 
 
@@ -449,6 +460,24 @@ async def refresh(ctx, job_uuid):
     await ctx.respond("Acknowledged.", ephemeral=True)
     await do_refresh(job_uuid)
 
+@discord.ext.commands.has_any_role("admin")
+@bot.slash_command(name="refresh_all", description="Refresh all images (temporary utility command)")
+async def refresh_all(ctx):
+    await ctx.respond("Acknowledged.", ephemeral=True)
+    with get_database() as client:
+        queueCollection = client.database.get_collection("queue")
+        jobs = queueCollection.find({})
+        max = 10000000
+        m = 0
+        for job in jobs:
+            if(job.get('progress_msg')):
+                m += 1
+                if m < max:
+                    do_refresh(job.get('uuid'))
+                else:
+                    logger.info(f"{job.get('uuid')} max update reached...")
+            else:
+                logger.info("no")
 
 async def do_refresh(job_uuid):
     embed, file, view = retrieve(job_uuid)
@@ -595,8 +624,10 @@ def retrieve(uuid):
         fn = job.get("filename")
     if fn != "":
         if DISCORD_UPLOAD_FILES:
+            # logger.info(f"Uploading {fn}...")
             file = discord.File(f"{UPLOAD_FOLDER}/{fn}", fn)
             embed.set_image(url=f"attachment://{fn}")
+            # logger.info(f"Upload of {fn} complete.")
         else:
             file = None
             embed.set_image(url=f"{BOT_PUBLIC_API}/image/{uuid}")

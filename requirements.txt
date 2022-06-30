@@ -16,3 +16,4 @@ jsbeautifier
 requests
 Pillow
 gunicorn
+boto3

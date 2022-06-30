@@ -14,6 +14,8 @@ import uuid
 import json
 from loguru import logger
 from PIL import Image
+import boto3
+import botocore.exceptions
 
 # https://iq-inc.com/wp-content/uploads/2021/02/AndyRelativeImports-300x294.jpg
 sys.path.append(".")
@@ -25,11 +27,45 @@ UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER")
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "log"}
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_SALT = os.getenv("BOT_SALT")
+BOT_USE_S3 = os.getenv("BOT_USE_S3")
+BOT_S3_BUCKET = os.getenv("BOT_S3_BUCKET")
+BOT_AWS_SERVER_PUBLIC_KEY = os.getenv("BOT_AWS_SERVER_PUBLIC_KEY")
+BOT_AWS_SERVER_SECRET_KEY = os.getenv("BOT_AWS_SERVER_SECRET_KEY")
 BOT_WEBSITE = os.getenv("BOT_WEBSITE")
 MAX_DREAM_OCCURENCE = os.getenv("MAX_DREAM_OCCURENCE")
 
+if BOT_USE_S3:
+    session = boto3.Session(
+    aws_access_key_id=BOT_AWS_SERVER_PUBLIC_KEY,
+    aws_secret_access_key=BOT_AWS_SERVER_SECRET_KEY
+)
+
 app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+
+def upload_file_s3(file_name, bucket, object_name=None, extra_args=None):
+    """Upload a file to an S3 bucket
+
+    :param file_name: File to upload
+    :param bucket: Bucket to upload to
+    :param object_name: S3 object name. If not specified then file_name is used
+    :return: True if file was uploaded, else False
+    """
+
+    # If S3 object_name was not specified, use file_name
+    if object_name is None:
+        object_name = os.path.basename(file_name)
+
+    # Upload the file
+    s3_client = boto3.client('s3')
+    
+    # s3_client = session.resource('s3')
+    try:
+        response = s3_client.upload_file(file_name, bucket, object_name, extra_args)
+    except Exception as e:
+        logger.error(e)
+        return False
+    return True
 
 
 @app.route("/register/<agent_id>")
@@ -496,8 +532,9 @@ def queuestats():
         queuedCount = queueCollection.count_documents({"status": "queued"})
         processingCount = queueCollection.count_documents({"status": "processing"})
         renderedCount = queueCollection.count_documents({"status": "archived"})
+        completedCount = queueCollection.count_documents({"status": "complete"})
         rejectedCount = queueCollection.count_documents({"status": "rejected"})
-        return dumps({"queuedCount": queuedCount, "processingCount": processingCount, "renderedCount": renderedCount, "rejectedCount": rejectedCount})
+        return dumps({"queuedCount": queuedCount, "processingCount": processingCount, "renderedCount": renderedCount, "rejectedCount": rejectedCount, "completedCount": completedCount})
 
 
 @app.route("/cancel/<job_uuid>", methods=["DELETE"])
@@ -587,7 +624,14 @@ def reject(agent_id, job_uuid):
 def upload_log(agent_id, job_uuid):
     file = request.files["file"]
     filename = secure_filename(file.filename)
-    file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
+    filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+    file.save(filepath)
+    if BOT_USE_S3:
+        try:
+            upload_file_s3(filepath, BOT_S3_BUCKET, f"images/{filename}")
+        except Exception as e:
+            logger.error(e)
+
     with open(os.path.join(app.config["UPLOAD_FOLDER"], filename), "r") as f:
         run_log = f.read()
 
@@ -605,7 +649,13 @@ def upload_log(agent_id, job_uuid):
 def upload_config(agent_id, job_uuid):
     file = request.files["file"]
     filename = secure_filename(file.filename)
-    file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
+    filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+    file.save(filepath)
+    if BOT_USE_S3:
+        try:
+            upload_file_s3(filepath, BOT_S3_BUCKET, f"images/{filename}")
+        except Exception as e:
+            logger.error(e)
     with open(os.path.join(app.config["UPLOAD_FOLDER"], filename), "r") as f:
         run_log = f.read()
 
@@ -670,8 +720,14 @@ def preview_file(agent_id, job_uuid):
             return redirect(request.url)
         if file and allowed_file(file.filename):
             filename = secure_filename(file.filename)
-            file.save(os.path.join(app.config["UPLOAD_FOLDER"], f"{job_uuid}_{filename}"))
+            filepath = os.path.join(app.config["UPLOAD_FOLDER"], f"{job_uuid}_{filename}")
+            file.save(filepath)
             logger.info(f"{job_uuid}_{filename} saved.")
+            if BOT_USE_S3:
+                try:
+                    upload_file_s3(filepath, BOT_S3_BUCKET, f"images/{job_uuid}_{filename}", {'ContentType': 'image/png'})
+                except Exception as e:
+                    logger.error(e)
             e = {"type": "preview", "agent": agent_id, "job_uuid": job_uuid}
             event(e)
             with get_database() as client:
@@ -703,7 +759,13 @@ def upload_file(agent_id, job_uuid):
             return redirect(request.url)
         if file and allowed_file(file.filename):
             filename = secure_filename(file.filename)
-            file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
+            filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+            file.save(filepath)
+            if BOT_USE_S3:
+                try:
+                    upload_file_s3(filepath, BOT_S3_BUCKET, f"images/{filename}", {'ContentType': 'image/png'})
+                except Exception as e:
+                    logger.error(e)
             with get_database() as client:
                 queueCollection = client.database.get_collection("queue")
                 results = queueCollection.update_one(
@@ -934,21 +996,3 @@ def dream(agent_id):
     dream_job = {"message ": f"You are dreaming.  (Job '{job_uuid}')", "uuid": job_uuid, "details": json.loads(dumps(record)), "success": True}
     return dream_job
 
-
-# @bot.slash_command(name="refresh_all", description="Refresh all images (temporary utility command)")
-# async def refresh_all(ctx):
-#     await ctx.respond("Acknowledged.", ephemeral=True)
-#     with get_database() as client:
-#         queueCollection = client.database.get_collection("queue")
-#         jobs = queueCollection.find({})
-#         max = 10000000
-#         m = 0
-#         for job in jobs:
-#             if(job.get('progress_msg')):
-#                 m += 1
-#                 if m < max:
-#                     do_refresh(job.get('uuid'))
-#                 else:
-#                     logger.info(f"{job.get('uuid')} max update reached...")
-#             else:
-#                 logger.info("no")
