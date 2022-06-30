@@ -26,7 +26,7 @@ mandrill
 marlin
 monitor lizard
 snake
-axelotol
+axolotl
 ocelot
 osprey
 owl
@@ -123,20 +123,20 @@ tom cat
 borzoi
 boxer dog
 collie dog
-corgie
+corgi
 dachshund
 dingo
 feist
 harrier dog
 hound
-huskyd dog
+husky dog
 maltese
 pinscher
 poodle
 pug
 retriever
 rottweiler
-schnauser
+schnauzer
 setter
 spaniel
 spitz

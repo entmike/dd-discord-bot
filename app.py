@@ -852,7 +852,7 @@ def placeorder():
         "shape": request.form.get("shape"),
         "model": request.form.get("model"),
         "diffusion_model": request.form.get("diffusion_model"),
-        "symmetry": request.form.get("symmetry", type=bool),
+        "symmetry": request.form.get("symmetry"),
         "symmetry_loss_scale": request.form.get("symmetry_loss_scale", type=int),
         "cut_schedule": request.form.get("cut_schedule"),
         "clip_guidance_scale": request.form.get("clip_guidance_scale", type=int),
