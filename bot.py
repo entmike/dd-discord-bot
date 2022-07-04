@@ -676,7 +676,7 @@ async def help(
     if term == "cut_schedule":
         help = """
         **`cut_schedule` controls 2 DD parameters:**
-        
+
         `cut_overview`: The schedule of overview cuts
         `cut_innercut`: The schedule of inner cuts
 
@@ -721,8 +721,8 @@ async def help(
 
     if term == "clip_guidance_scale":
         help = f"""
-        CGS is one of the most important parameters you will use. It tells DD how strongly you want CLIP to move toward your prompt each timestep.  Higher is generally better, but if CGS is too strong it will overshoot the goal and distort the image. So a happy medium is needed, and it takes experience to learn how to adjust CGS. 
- 
+        CGS is one of the most important parameters you will use. It tells DD how strongly you want CLIP to move toward your prompt each timestep.  Higher is generally better, but if CGS is too strong it will overshoot the goal and distort the image. So a happy medium is needed, and it takes experience to learn how to adjust CGS.
+
         Note that this parameter generally scales with image dimensions. In other words, if you increase your total dimensions by `50%` (e.g. a change from `512 x 512` to `512 x 768`), then to maintain the same effect on the image, you’d want to increase `clip_guidance_scale` from `5000` to `7500`.
         """
     embed = discord.Embed(title=f"{term}", color=discord.Color.random(), description=help)
@@ -1241,7 +1241,9 @@ async def destroy(ctx, uuid):
 
         d = requests.delete(f"{BOT_API}/job/{uuid}").json()
         logger.info(d)
-        count = d["deleted_count"]
+        count = 0
+        if "deleted_count" in d:
+            count = d["deleted_count"]
         if count == 0:
             await ctx.respond(f"❌ Could not delete job `{uuid}`.  Check the Job ID.", ephemeral=True)
         else:
