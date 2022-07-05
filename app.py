@@ -1,8 +1,10 @@
 from io import BytesIO, StringIO
+import requests
 import jsbeautifier
 import os, sys
 from webbrowser import get
 from flask import Flask, flash, request, redirect, url_for, jsonify, send_file
+from flask_cors import CORS, cross_origin
 from dotenv import load_dotenv
 from yaml import dump, full_load
 from werkzeug.utils import secure_filename
@@ -16,6 +18,15 @@ from loguru import logger
 from PIL import Image
 import boto3
 import botocore.exceptions
+from six.moves.urllib.request import urlopen
+from functools import wraps
+from jose import jwt
+from flask import _request_ctx_stack
+# from .auth import current_user
+
+AUTH0_DOMAIN = 'dev-yqzsn326.auth0.com'
+API_AUDIENCE = 'https://api.feverdreams.app/'
+ALGORITHMS = ["RS256"]
 
 # https://iq-inc.com/wp-content/uploads/2021/02/AndyRelativeImports-300x294.jpg
 sys.path.append(".")
@@ -26,9 +37,11 @@ load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER")
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "log"}
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_STALL_TIMEOUT=180
 BOT_SALT = os.getenv("BOT_SALT")
 BOT_USE_S3 = os.getenv("BOT_USE_S3")
 BOT_S3_BUCKET = os.getenv("BOT_S3_BUCKET")
+BOT_S3_WEB = os.getenv("BOT_S3_WEB")
 BOT_AWS_SERVER_PUBLIC_KEY = os.getenv("BOT_AWS_SERVER_PUBLIC_KEY")
 BOT_AWS_SERVER_SECRET_KEY = os.getenv("BOT_AWS_SERVER_SECRET_KEY")
 BOT_WEBSITE = os.getenv("BOT_WEBSITE")
@@ -42,6 +55,79 @@ if BOT_USE_S3:
 
 app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+CORS(app)
+
+# Format error response and append status code
+def get_token_auth_header():
+    """Obtains the Access Token from the Authorization Header
+    """
+    auth = request.headers.get("Authorization", None)
+    if not auth:
+        raise AuthError({"code": "authorization_header_missing",
+                        "description":
+                            "Authorization header is expected"}, 401)
+
+    parts = auth.split()
+
+    if parts[0].lower() != "bearer":
+        raise AuthError({"code": "invalid_header",
+                        "description":
+                            "Authorization header must start with"
+                            " Bearer"}, 401)
+    elif len(parts) == 1:
+        raise AuthError({"code": "invalid_header",
+                        "description": "Token not found"}, 401)
+    elif len(parts) > 2:
+        raise AuthError({"code": "invalid_header",
+                        "description":
+                            "Authorization header must be"
+                            " Bearer token"}, 401)
+
+    token = parts[1]
+    logger.info(token)
+    return token
+
+def requires_auth(f):
+    """Determines if the Access Token is valid
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = get_token_auth_header()
+        jsonurl = urlopen("https://"+AUTH0_DOMAIN+"/.well-known/jwks.json")
+        jwks = json.loads(jsonurl.read())
+        unverified_header = jwt.get_unverified_header(token)
+        rsa_key = {}
+        logger.info(unverified_header)
+        for key in jwks["keys"]:
+            logger.info(key)
+            if key["kid"] == unverified_header["kid"]:
+                rsa_key = {
+                    "kty": key["kty"],
+                    "kid": key["kid"],
+                    "use": key["use"],
+                    "n": key["n"],
+                    "e": key["e"]
+                }
+        if rsa_key:
+            try:
+                payload = jwt.decode(
+                    token,
+                    rsa_key,
+                    algorithms=ALGORITHMS,
+                    audience=API_AUDIENCE,
+                    issuer="https://"+AUTH0_DOMAIN+"/"
+                )
+            except jwt.ExpiredSignatureError:
+                raise AuthError({"code": "token_expired",  "description": "token is expired"}, 401)
+            except jwt.JWTClaimsError:
+                raise AuthError({"code": "invalid_claims", "description": "incorrect claims, please check the audience and issuer"}, 401)
+            except Exception:
+                raise AuthError({"code": "invalid_header", "description": "Unable to parse authentication token."}, 401)
+
+            _request_ctx_stack.top.current_user = payload
+            return f(*args, **kwargs)
+        raise AuthError({"code": "invalid_header", "description": "Unable to find appropriate key"}, 401)
+    return decorated
 
 def upload_file_s3(file_name, bucket, object_name=None, extra_args=None):
     """Upload a file to an S3 bucket
@@ -66,6 +152,18 @@ def upload_file_s3(file_name, bucket, object_name=None, extra_args=None):
         logger.error(e)
         return False
     return True
+
+# Error handler
+class AuthError(Exception):
+    def __init__(self, error, status_code):
+        self.error = error
+        self.status_code = status_code
+
+@app.errorhandler(AuthError)
+def handle_auth_error(ex):
+    response = jsonify(ex.error)
+    response.status_code = ex.status_code
+    return response
 
 
 @app.route("/register/<agent_id>")
@@ -101,11 +199,11 @@ def log(message, title="Message"):
 
 
 def event(event):
+    return
     with get_database() as client:
         eventTable = client.database.get_collection("events")
         eventTable.insert_one({"timestamp": str(datetime.now()), "ack": False, "uuid": str(uuid.uuid4()), "event": event})
-    # logger.info(f"Event logged: {event}")
-
+    logger.info(f"Event logged: {event}")
 
 @app.route("/toggle_pin/<user_id>/<uuid>/")
 def toggle_pin(user_id, uuid):
@@ -165,11 +263,16 @@ def recent_images2(amount, page):
         ])
         return dumps(r)
 
-@app.route("/random/<amount>")
-def random_images(amount):
+@app.route("/random/<amount>", defaults={"shape": None})
+@app.route("/random/<amount>/<shape>")
+def random_images(amount, shape):
+    q = {"status": "archived"}
+    if shape is not None:
+        q["shape"] = shape
+
     with get_database() as client:
         r = client.database.get_collection("queue").aggregate([
-            {"$match": {"status": "archived"}},
+            {"$match": q},
             {"$sample": {"size": int(amount)}},
             {"$lookup" : {
                 "from":"users",
@@ -236,12 +339,12 @@ def getsince(seconds):
         return dumps(queue)
 
 
-@app.route("/queue/", methods=["GET"], defaults={"status": "all"})
-@app.route("/queue/<status>/")
-def queue(status):
+@app.route("/web/queue/", methods=["GET"], defaults={"status": "all"})
+@app.route("/web/queue/<status>/")
+def web_queue(status):
     logger.info(f"Queue request for status {status}...")
     if status == "stalled":
-        since = datetime.now() - timedelta(minutes=30)
+        since = datetime.now() - timedelta(minutes=BOT_STALL_TIMEOUT)
         q = {"status": "processing", "$or": [{"last_preview": {"$lt": since}}, {"last_preview": {"$exists": False}, "timestamp": {"$lt": since}}]}
     else:
         q = {"status": {"$nin": ["archived", "rejected"]}}
@@ -253,7 +356,63 @@ def queue(status):
     #     del q["status"]
     with get_database() as client:
         query = {"$query": q, "$orderby": {"timestamp": -1}}
+        # queue = client.database.get_collection("queue").find(query)
+        queue = client.database.get_collection("queue").aggregate( [
+                {"$match" : q},
+                {"$lookup" : {
+                    "from":"users",
+                    "localField" : "author",
+                    "foreignField" : "user_id",
+                    "as" : "userdets"
+                }},
+                {"$unwind": "$userdets"},
+                {"$unwind": "$uuid"},
+                { "$addFields" :{
+                    "userdets.user_str": {"$toString": "$userdets.user_id"}
+                }
+            }
+        ])
+        return dumps(queue)
+
+
+
+@app.route("/queue/", methods=["GET"], defaults={"status": "all"})
+@app.route("/queue/<status>/")
+def queue(status):
+    logger.info(f"Queue request for status {status}...")
+    if status == "stalled":
+        since = datetime.now() - timedelta(minutes=BOT_STALL_TIMEOUT)
+        q = {"status": "processing", "$or": [{"last_preview": {"$lt": since}}, {"last_preview": {"$exists": False}, "timestamp": {"$lt": since}}]}
+    else:
+        q = {"status": {"$nin": ["archived", "rejected"]}}
+    # if who == "me":
+    #     q["author"] = int(author)
+    if status != "all" and status != "stalled":
+        q["status"] = status
+    # if status == "all" and who=="me":
+    #     del q["status"]
+    with get_database() as client:
+        n = datetime.now()
+        query = {"$query": q, "$orderby": {"timestamp": -1}}
         queue = client.database.get_collection("queue").find(query)
+        # queue = client.database.get_collection("queue").aggregate( [
+        #         {"$match" : q},
+            #     {"$lookup" : {
+            #         "from":"users",
+            #         "localField" : "author",
+            #         "foreignField" : "user_id",
+            #         "as" : "userdets"
+            #     }},
+            #     {"$unwind": "$userdets"},
+            #     {"$unwind": "$uuid"},
+            #     { "$addFields" :{
+            #         "userdets.user_str": {"$toString": "$userdets.user_id"}
+            #     }
+            # }
+        # ])
+        e = datetime.now()
+        t = e - n
+        logger.info(f"{t} seconds elapsed")
         return dumps(queue)
 
 
@@ -373,17 +532,30 @@ def serverinfo(subject):
         return dumps(post)
 
 
-@app.route("/dream", methods=["POST"])
-def dream():
-    if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
-        return jsonify({"message": "ERROR: Unauthorized"}), 401
-    with get_database() as client:
-        dreamCollection = client.database.get_collection("userdreams")
+@app.route("/private",  methods=["GET"])
+@requires_auth
+def private():
+    logger.info(f"Dreams from {discord_id}...")
+    return jsonify(_request_ctx_stack.top.current_user)
+
+@app.route("/web/dream", methods=["POST","GET"])
+@requires_auth
+def webdream():
+    current_user = _request_ctx_stack.top.current_user
+    discord_id = current_user["sub"].split("|")[2]
+
+    if request.method == "GET":
+        with get_database() as client:
+            dreamCollection = client.database.get_collection("userdreams")
+            dream = dreamCollection.find_one({"author_id": int(discord_id)})
+            return dumps(dream)
+
+    if request.method == "POST":
         dreamCollection.update_one(
-            {"author_id": request.form.get("author_id", type=int)},
+            {"author_id": discord_id},
             {
                 "$set": {
-                    "author_id": request.form.get("author_id", type=int),
+                    "author_id": discord_id,
                     "dream": request.form.get("dream"),
                     "count": 0,
                     "last_used": datetime.now(),
@@ -393,8 +565,35 @@ def dream():
             upsert=True,
         )
 
-    logger.info(request.form.get("dream"))
-    return dumps({"message": "received"})
+
+@app.route("/dream", methods=["POST","GET"])
+def dream():
+    if request.method == "POST":
+        if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
+            return jsonify({"message": "ERROR: Unauthorized"}), 401
+        with get_database() as client:
+            dreamCollection = client.database.get_collection("userdreams")
+            dreamCollection.update_one(
+                {"author_id": request.form.get("author_id", type=int)},
+                {
+                    "$set": {
+                        "author_id": request.form.get("author_id", type=int),
+                        "dream": request.form.get("dream"),
+                        "count": 0,
+                        "last_used": datetime.now(),
+                        "timestamp": datetime.now(),
+                    }
+                },
+                upsert=True,
+            )
+
+        logger.info(request.form.get("dream"))
+        return jsonify({"message": "received"})
+    if request.method == "GET":
+        with get_database() as client:
+            dreamCollection = client.database.get_collection("userdreams")
+            dream = dreamCollection.find_one({"author_id", request.form.get("user", type=int)})
+            return jsonify(dream)
 
 
 @app.route("/users")
@@ -435,7 +634,7 @@ def updatejob():
     if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
         return jsonify({"message": "ERROR: Unauthorized"}), 401
     uuid = request.form.get("uuid")
-    logger.info(f"Updating job '{uuid}'")
+    # logger.info(f"Updating job '{uuid}'")
     vals = request.form
     newvals = {}
     for val in vals:
@@ -483,11 +682,15 @@ def job(job_uuid):
     if request.method == "GET":
         with get_database() as client:
             queueCollection = client.database.get_collection("queue")
-            job = queueCollection.aggregate( [
+            jobs = queueCollection.aggregate( [
                 {"$match" : {"uuid": job_uuid}},
+                { "$addFields" :{
+                    "author_bigint": {"$toLong": "$author"}
+                    }
+                },
                 {"$lookup" : {
                     "from":"users",
-                    "localField" : "author",
+                    "localField" : "author_bigint",
                     "foreignField" : "user_id",
                     "as" : "userdets"
                 }},
@@ -495,10 +698,24 @@ def job(job_uuid):
                 {"$unwind": "$uuid"},
                 { "$addFields" :{
                     "userdets.user_str": {"$toString": "$userdets.user_id"}
+                    }
                 }
-            }
             ])
-            return dumps(list(job)[0])
+            jobs = list(jobs)
+            if len(jobs)==0:
+                return dumps(None)
+            try:
+                views = jobs[0]["views"]
+            except:
+                views = 0
+            logger.info(jobs[0])
+            # views = job[0].get("views")
+            # if not views:
+            #     views = 0
+            views += 1
+            queueCollection.update_one({"uuid": job_uuid}, {"$set": {"views": views}}, upsert=True)
+            jobs[0]["views"] = views
+            return dumps(jobs[0])
     if request.method == "DELETE":
         if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
             return jsonify({"message": "ERROR: Unauthorized"}), 401
@@ -527,6 +744,7 @@ def agentstats():
 
 @app.route("/queuestats")
 def queuestats():
+    n = datetime.now()
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
         queuedCount = queueCollection.count_documents({"status": "queued"})
@@ -534,6 +752,9 @@ def queuestats():
         renderedCount = queueCollection.count_documents({"status": "archived"})
         completedCount = queueCollection.count_documents({"status": "complete"})
         rejectedCount = queueCollection.count_documents({"status": "rejected"})
+        e = datetime.now()
+        t = e - n
+        logger.info(f"{t} seconds elapsed in queuestats call")
         return dumps({"queuedCount": queuedCount, "processingCount": processingCount, "renderedCount": renderedCount, "rejectedCount": rejectedCount, "completedCount": completedCount})
 
 
@@ -576,6 +797,24 @@ def serve_pil_image(pil_img):
 @app.route("/thumbnail/<job_uuid>/<size>", methods=["GET"])
 def thumbnail(job_uuid, size):
     try:
+        try:
+            url = f"{BOT_S3_WEB}{job_uuid}0_0.png"
+            img = Image.open(urlopen(url))
+        except:
+            url = f"{BOT_S3_WEB}{job_uuid}_progress.png"
+            img = Image.open(urlopen(url))
+        img.thumbnail((int(size), int(size)), Image.ANTIALIAS)
+        return serve_pil_image(img)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        return f"Could not locate {url}.  This might be because the render has not completed yet.  Or because the job failed.  Or check your job uuid.  Or a gremlin ate the image.  Probably the gremlin.\n{tb}"
+
+
+@app.route("/local/thumbnail/<job_uuid>", methods=["GET"], defaults={"size": 128})
+@app.route("/local/thumbnail/<job_uuid>/<size>", methods=["GET"])
+def local_thumbnail(job_uuid, size):
+    try:
         filename = f"{job_uuid}0_0.png"
         fn = os.path.join(app.config["UPLOAD_FOLDER"], filename)
         img = Image.open(fn)
@@ -584,21 +823,20 @@ def thumbnail(job_uuid, size):
     except Exception as e:
         return f"Could not locate {filename}.  This might be because the render has not completed yet.  Or because the job failed.  Or check your job uuid.  Or a gremlin ate the image.  Probably the gremlin.\n{e}"
 
+# @app.route("/image/<job_uuid>", methods=["GET"])
+# def image(job_uuid):
+#     try:
+#         filename = f"{job_uuid}0_0.png"
+#         fn = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+#         from os.path import exists
 
-@app.route("/image/<job_uuid>", methods=["GET"])
-def image(job_uuid):
-    try:
-        filename = f"{job_uuid}0_0.png"
-        fn = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-        from os.path import exists
+#         if not exists(fn):
+#             filename = f"{job_uuid}_progress.png"
+#             fn = os.path.join(app.config["UPLOAD_FOLDER"], filename)
 
-        if not exists(fn):
-            filename = f"{job_uuid}_progress.png"
-            fn = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-
-        return send_file(fn, mimetype="image/png")
-    except:
-        return f"Could not locate {filename}.  This might be because the render has not completed yet.  Or because the job failed.  Or check your job uuid.  Or a gremlin ate the image.  Probably the gremlin."
+#         return send_file(fn, mimetype="image/png")
+#     except:
+#         return f"Could not locate {filename}.  This might be because the render has not completed yet.  Or because the job failed.  Or check your job uuid.  Or a gremlin ate the image.  Probably the gremlin."
 
 
 @app.route("/reject/<agent_id>/<job_uuid>", methods=["POST"])
@@ -726,6 +964,7 @@ def preview_file(agent_id, job_uuid):
             if BOT_USE_S3:
                 try:
                     upload_file_s3(filepath, BOT_S3_BUCKET, f"images/{job_uuid}_{filename}", {'ContentType': 'image/png'})
+                    logger.info(f"{job_uuid}_{filename} saved to s3.")
                 except Exception as e:
                     logger.error(e)
             e = {"type": "preview", "agent": agent_id, "job_uuid": job_uuid}
@@ -873,16 +1112,40 @@ def placeorder():
     return "ok"
 
 
-@app.route("/search/<regexp>", methods=["GET"])
-def search(regexp):
+@app.route("/search/<regexp>", methods=["GET"], defaults={"page": 1, "amount" : 50})
+@app.route("/search/<regexp>/<amount>", methods=["GET"], defaults={"page": 1})
+@app.route("/search/<regexp>/<amount>/<page>", methods=["GET"]) 
+def search(regexp, amount, page):
     with get_database() as client:
-        j = client.database.get_collection("queue").find({"text_prompt": {"$regex": regexp, "$options": "i"}})
+        j = client.database.get_collection("queue").aggregate([
+            {"$match" : {
+                "text_prompt": {"$regex": regexp, "$options": "i"},
+                "$or" : [{"status": "processing"}, {"status": "complete"}, {"status": "archived"}]
+            }},
+            {"$lookup" : {
+                "from":"users",
+                "localField" : "author",
+                "foreignField" : "user_id",
+                "as" : "userdets"
+            }},
+            {"$skip" : (int(page)-1) * int(amount)},
+            {"$limit" : int(amount)},
+            {"$unwind": "$userdets"},
+        ])
         return dumps(j)
 
 
 @app.route("/takeorder/<agent_id>", methods=["POST"])
 def takeorder(agent_id):
     if request.method == "POST":
+
+        with get_database() as client:
+            agentCollection = client.database.get_collection("agents")
+            agent = agentCollection.find_one({"agent_id": agent_id})
+            if not agent:
+                logger.info(f"Unknown agent looking for work: {agent_id}")
+                return dumps({"message": f"I don't know you.", "success": False})
+
         idle_time = request.form.get("idle_time")
         model = request.form.get("model")
         pulse(agent_id=agent_id)
@@ -927,10 +1190,12 @@ def takeorder(agent_id):
                 if queueCount > 0:
                     # Work found
                     job = queueCollection.find_one({"$query": query, "$orderby": {"timestamp": 1}})
-                    results = queueCollection.update_one({"uuid": job.get("uuid")}, {"$set": {"status": "processing", "agent_id": agent_id}})
+                    results = queueCollection.update_one({"uuid": job.get("uuid")}, {"$set": {"status": "processing", "agent_id": agent_id, "last_preview": datetime.now()}})
                     count = results.modified_count
                     if count > 0:
-                        log(f"Good news, <@{job.get('author')}>!  Your job `{job.get('uuid')}` is being processed now by `{agent_id}`...", title="💼 Job in Process")
+                        e = {"type": "progress", "agent": agent_id, "job_uuid": job.get('uuid'), "percent": 0, "gpustats": None}
+                        event(e)
+                        # log(f"Good news, <@{job.get('author')}>!  Your job `{job.get('uuid')}` is being processed now by `{agent_id}`...", title="💼 Job in Process")
                         agentCollection = client.database.get_collection("agents")
                         agentCollection.update_one({"agent_id": agent_id}, {"$set": {"mode": "working", "idle_time": 0}})
                         return dumps({"message": f"Your current job is {job.get('uuid')}.", "uuid": job.get("uuid"), "details": json.loads(dumps(job)), "success": True})
@@ -985,13 +1250,15 @@ def dream(agent_id):
             "sat_scale": sat_scale,
             "set_seed": -1,
             "cut_schedule": cut_schedule,
-            # "author": 977198605221912616,
             "author": author_id,
             "status": "processing",
             "timestamp": datetime.utcnow(),
+            "last_preview": datetime.utcnow()
         }
         queueCollection = client.database.get_collection("queue")
         queueCollection.insert_one(record)
+        e = {"type": "progress", "agent": agent_id, "job_uuid": job_uuid, "percent": 0, "gpustats": None}
+        event(e)
 
     dream_job = {"message ": f"You are dreaming.  (Job '{job_uuid}')", "uuid": job_uuid, "details": json.loads(dumps(record)), "success": True}
     return dream_job
