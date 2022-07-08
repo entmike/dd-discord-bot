@@ -4,7 +4,7 @@ def get_database():
     import pymongo
 
     # Provide the mongodb atlas url to connect python to mongodb using pymongo
-    MONGODB_CONNECTION = MAX_DREAM_OCCURENCE = os.getenv('MONGODB_CONNECTION', "mongodb://mongodb/database")
+    MONGODB_CONNECTION = MAX_DREAM_OCCURENCE = os.getenv('MONGODB_CONNECTION', "mongodb://mongodb/feverdreams")
 
     # Create a connection using MongoClient. You can import MongoClient or use pymongo.MongoClient
     from pymongo import MongoClient
@@ -17,4 +17,4 @@ def get_database():
 if __name__ == "__main__":
 
     # Get the database
-    dbname = get_database()
+    dbname = get_database("feverdreams")

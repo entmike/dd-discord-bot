@@ -22,3 +22,4 @@ python-jose
 flask-cors
 six
 dnspython
+colorthief
