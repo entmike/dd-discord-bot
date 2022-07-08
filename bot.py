@@ -1492,7 +1492,7 @@ async def agent_status():
         messageid = int(subject["message"])
     else:
         channelid = DISCORD_AGENT_STATS
-        messageid = None
+        messageid = DISCORD_AGENT_STATS_MSG
 
     channel = bot.get_channel(channelid)
     table = Texttable(160)
