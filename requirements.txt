@@ -4,6 +4,7 @@ python-dotenv
 pydotted
 loguru
 flask
+flask_cors
 pandas
 watchdog
 pyyaml
@@ -17,3 +18,8 @@ requests
 Pillow
 gunicorn
 boto3
+python-jose
+flask-cors
+six
+dnspython
+colorthief

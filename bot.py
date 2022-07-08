@@ -33,8 +33,10 @@ BOT_NAME = os.getenv("BOT_NAME")
 BOT_WEBSITE = os.getenv("BOT_WEBSITE")
 BOT_ICON = os.getenv("BOT_ICON")
 
+BOT_S3_WEB = os.getenv("BOT_S3_WEB")
 DISCORD_SERVER_ID = int(os.getenv("DISCORD_SERVER_ID"))
 DISCORD_DAY_DREAMS = int(os.getenv("DISCORD_DAY_DREAMS"))
+DISCORD_NIGHTMARES = int(os.getenv("DISCORD_NIGHTMARES"))
 DISCORD_SKETCHES = int(os.getenv("DISCORD_SKETCHES"))
 DISCORD_MUTATIONS = int(os.getenv("DISCORD_MUTATIONS"))
 DISCORD_IMAGES = int(os.getenv("DISCORD_IMAGES"))
@@ -44,8 +46,9 @@ DISCORD_QUEUE_STATS = int(os.getenv("DISCORD_QUEUE_STATS"))
 DISCORD_AGENT_STATS = int(os.getenv("DISCORD_AGENT_STATS"))
 DISCORD_QUEUE_STATS_MSG = int(os.getenv("DISCORD_QUEUE_STATS_MSG"))
 DISCORD_AGENT_STATS_MSG = int(os.getenv("DISCORD_AGENT_STATS_MSG"))
-DISCORD_UPLOAD_FILES = bool(os.getenv("DISCORD_UPLOAD_FILES", True))
-UPLOAD_FOLDER= str(os.getenv("UPLOAD_FOLDER", "images"))
+# DISCORD_UPLOAD_FILES = bool(os.getenv("DISCORD_UPLOAD_FILES", False))
+DISCORD_UPLOAD_FILES = False
+UPLOAD_FOLDER = str(os.getenv("UPLOAD_FOLDER", "images"))
 STEP_LIMIT = int(os.getenv("STEP_LIMIT", 150))
 PROFANITY_THRESHOLD = float(os.getenv("PROFANITY_THRESHOLD", 0.7))
 AUTHOR_LIMIT = int(os.getenv("AUTHOR_LIMIT", 2))
@@ -63,7 +66,7 @@ def updateJob(data):
     Updates a Job by `uuid` via API call.
     """
     api = f"{BOT_API}/updatejob"
-    logger.info(f"🌍 Updating Job '{api}'...")
+    logger.info(f"🌍 Updating Job '{data}'...")
     try:
         r = requests.post(api, data=data, headers={"x-dd-bot-token": BOT_TOKEN}, timeout=10).json()
         logger.info("Job updated.")
@@ -71,6 +74,7 @@ def updateJob(data):
         logger.info("Update Job timed out.")
         r = None
     return r
+
 
 def updateUser(data):
     """
@@ -81,6 +85,7 @@ def updateUser(data):
     logger.info(data)
     return requests.post(api, data=data, headers={"x-dd-bot-token": BOT_TOKEN}).json()
 
+
 def lazy(obj, field):
     if obj.has_key(field):
         return obj[field]
@@ -89,6 +94,7 @@ def lazy(obj, field):
 
 
 async def queueBroadcast(who, status, author=None, channel=None, label="queue"):
+    n = datetime.datetime.now()
     messageid = None
     subject = requests.get(f"{BOT_API}/serverinfo/{label}").json()
     if subject:
@@ -99,7 +105,11 @@ async def queueBroadcast(who, status, author=None, channel=None, label="queue"):
     # Get data from API
     api = f"{BOT_API}/queue/{status}"
     logger.info(f"🌍 Getting queue from '{api}'...")
+    n = datetime.datetime.now()
     queue = requests.get(api).json()
+    e = datetime.datetime.now()
+    t = e - n
+    logger.info(f"⏱️ Request took {t} seconds.")
     color = discord.Colour.blurple()
     if status == "processing":
         color = discord.Colour.green()
@@ -112,17 +122,8 @@ async def queueBroadcast(who, status, author=None, channel=None, label="queue"):
     embed.set_footer(text=f"Last update: {datetime.datetime.now()}")
     for j, job in enumerate(queue):
         user = await bot.fetch_user(job.get("author"))
-        summary = f"""
-        - 🧑‍🦲 Author: <@{job.get('author')}>
-        - ✍️ Text Prompt: `{job.get('text_prompt')[0:100]}...`
-        - Mode: `{job.get('mode')}`
-        - Status: `{job.get('status')}`
-        - Progress: `{job.get('percent')}%`
-        - Timestamp: `{job.get('timestamp')}`
-        - Agent: `{job.get('agent_id')}`
-        """
         msgid = job.get("progress_msg")
-        details = f"[Job]({BOT_API}/job/{job.get('uuid')})"
+        details = f"[Job]({BOT_PUBLIC_API}/job/{job.get('uuid')})"
         summary = f"<@{job.get('author')}> | `{job.get('render_type')}` | `{job.get('percent')}%` | `{job.get('agent_id')}` | {details}"
         if msgid:
             if job.get("channel_id"):
@@ -137,8 +138,13 @@ async def queueBroadcast(who, status, author=None, channel=None, label="queue"):
                     channel_id = DISCORD_SKETCHES
                 if job.get("render_type") == "dream":
                     channel_id = DISCORD_DAY_DREAMS
+                if job.get("render_type") == "nightmare":
+                    channel_id = DISCORD_NIGHTMARES
+                if job.get("nsfw") == "yes":
+                    channel_id = DISCORD_NIGHTMARES
             summary = f"{summary} | [Image](https://discord.com/channels/{DISCORD_SERVER_ID}/{channel_id}/{msgid})"
-        embed.add_field(name=f"{job.get('uuid')}", value=summary, inline=False)
+        if j < 20:
+            embed.add_field(name=f"{job.get('uuid')}", value=summary, inline=False)
     if messageid != None:
         try:
             message = await channel.fetch_message(messageid)
@@ -153,9 +159,13 @@ async def queueBroadcast(who, status, author=None, channel=None, label="queue"):
         messageid = msg.id
         requests.post(f"{BOT_API}/serverinfo", headers={"x-dd-bot-token": BOT_TOKEN}, data={"subject": label, "channel": int(channelid), "message": int(messageid)}).json()
 
+    e = datetime.datetime.now()
+    t = e - n
+    logger.info(f"⏱️ Task took {t} seconds to complete.")
 
-async def queue_status(channel=None, messageid=None):
-    channel = bot.get_channel(channel)
+
+async def queue_status():
+    n = datetime.datetime.now()
     api = f"{BOT_API}/queuestats"
     logger.info(f"🌍 Getting queue stats from '{api}'...")
     queuestats = requests.get(api).json()
@@ -175,130 +185,38 @@ async def queue_status(channel=None, messageid=None):
     """
     embed.add_field(name="Queue Stats", value=summary, inline=False)
     embed.set_footer(text=f"Last update: {datetime.datetime.now()}")
-    if messageid != None:
-        message = await channel.fetch_message(messageid)
-        await message.edit(embed=embed)
+
+    subject = requests.get(f"{BOT_API}/serverinfo/queue_status").json()
+    if subject:
+        channel = int(subject["channel"])
+        messageid = int(subject["message"])
     else:
-        await channel.send(embed=embed)
+        channel = DISCORD_QUEUE_STATS
+        messageid = None
+
+    channel = bot.get_channel(channel)
+    if messageid != None:
+        try:
+            message = await channel.fetch_message(messageid)
+            await message.edit(embed=embed)
+        except:
+            msg = await message.send(embed=embed)
+            requests.post(
+                f"{BOT_API}/serverinfo", headers={"x-dd-bot-token": BOT_TOKEN}, data={"subject": "queue_status", "channel": int(channel.id), "message": int(msg.id)}
+            ).json()
+    else:
+        msg = await channel.send(embed=embed)
+        requests.post(f"{BOT_API}/serverinfo", headers={"x-dd-bot-token": BOT_TOKEN}, data={"subject": "queue_status", "channel": int(channel.id), "message": int(msg.id)}).json()
+    e = datetime.datetime.now()
+
+    t = e - n
+    logger.info(f"⏱️ Task took {t} seconds to complete.")
 
 
-# this code will be executed every 10 seconds after the bot is ready
-@tasks.loop(seconds=10)
-async def task_loop():
-    global ticks
-    ticks += 1
-    botspam_channels = ["botspam"]
-    logger.info("loop")
-    # Queue Stats
-    logger.info("Updating Queue Stats")
-    await queue_status(DISCORD_QUEUE_STATS, DISCORD_QUEUE_STATS_MSG)
-    # Agents
-    logger.info("Updating Agent Status")
-    await agent_status()
-    # Active
-    logger.info("Updating Active Queue")
-    await queueBroadcast("all", "processing", None, DISCORD_ACTIVE_JOBS, "active")
-    # Waiting
-    logger.info("Updating Waiting Queue")
-    await queueBroadcast("all", "queued", None, DISCORD_WAITING_JOBS, "waiting")
-    # Process any Events
-    logger.info("checking events")
-    api = f"{BOT_API}/events"
-    logger.info(f"🌍 Getting events from '{api}'...")
-    events = requests.get(api, headers={"x-dd-bot-token": BOT_TOKEN}).json()
-    logger.info(f"🌍 Clearing events from '{api}'...")
-    api = f"{BOT_API}/clearevents"
-    requests.get(api, headers={"x-dd-bot-token": BOT_TOKEN})
-
-    logger.info(f"Processing {len(events)} events...")
-    for event in events:
-        # logger.info("event")
-        title = "Message"
-        embed = discord.Embed(
-            title="Event",
-            description=event.get("event"),
-            color=discord.Colour.blurple(),
-        )
-        # for channel in botspam_channels:
-        #     channel = discord.utils.get(bot.get_all_channels(), name=channel)
-        # await channel.send(embed=embed)
-        event_type = event.get("event")["type"]
-        if event_type == "progress" or event_type == "preview":
-            job_uuid = event.get("event")["job_uuid"]
-            # logger.info(job_uuid)
-            # logger.info(f"Progress Update found for {job_uuid}")
-            api = f"{BOT_API}/job/{job_uuid}"
-            # logger.info(f"🌍 Getting job from '{api}'...")
-            job = requests.get(api).json()
-            if job.get("last_preview"):
-                # logger.info(type(job.get("last_preview")))
-                if type(job.get("last_preview")) is str:
-                    strdate = job.get("last_preview")
-                    last_preview = datetime.datetime.strptime(strdate, "%Y-%m-%d %H:%M:%S.%f")
-                else:
-                    strdate = job.get("last_preview")["$date"]
-                    try:
-                        last_preview = datetime.datetime.strptime(strdate, "%Y-%m-%dT%H:%M:%S.%fZ")
-                    except:
-                        last_preview = datetime.datetime.strptime(strdate, "%Y-%m-%dT%H:%M:%SZ")
-            else:
-                last_preview = None
-            # last_preview = datetime.datetime(job.get("last_preview")["$date"])
-            toosoon = False
-            if last_preview == None:
-                toosoon = False
-            else:
-                n = datetime.datetime.now()
-                duration = n - last_preview
-                # logger.info(duration)
-                if duration.total_seconds() < 60:
-                    toosoon = True
-                if job:
-                    if job.get("status") == "processing" and toosoon == False:
-                        updateJob({"uuid": job_uuid, "last_preview": datetime.datetime.now()})
-                        embed, file, view = retrieve(job_uuid)
-                        if embed:
-                            logger.info(f"⬆️ Updating progress in discord for {job.get('uuid')}")
-                            render_type = job.get("render_type")
-                            if render_type is None:
-                                render_type = "render"
-                            if render_type == "sketch":
-                                channel = "sketches"
-                            if render_type == "render":
-                                channel = "images"
-                            if render_type == "mutate":
-                                channel = "mutations"
-                            if render_type == "dream":
-                                channel = "day-dreams"
-
-                            logger.info(f"🤩 {channel}")
-                            channel = discord.utils.get(bot.get_all_channels(), name=channel)
-                            # logger.info(f"Updating message {job.get('progress_msg')}...")
-                            try:
-                                if job.get("progress_msg"):
-                                    msgid = job.get("progress_msg")
-                                else:
-                                    msg = await channel.send(embed=embed, view=view)
-                                    updateJob({"uuid": job.get("uuid"), "progress_msg": msg.id})
-                                    msgid = msg.id
-                                message = await channel.fetch_message(msgid)
-                                if file:
-                                    if DISCORD_UPLOAD_FILES:
-                                        await message.edit(file=file, view=view, embed=embed)
-                                    else:
-                                        await message.edit(embed=embed, view=view)
-                                else:
-                                    await message.edit(embed=embed, view=view)
-                            except:
-                                # logger.error(f"Could not update message {job.get('progress_msg')}")
-                                pass
-            # Acknowledge (delete) event
-            # api = f"{BOT_API}/ack_event/{event.get('uuid')}"
-            # requests.get(api, headers={"x-dd-bot-token": BOT_TOKEN}).json()
-
-    # Display any new messages
+async def processLogs():
     api = f"{BOT_API}/logs/"
     logger.info(f"🌍 Getting logs from '{api}'...")
+    botspam_channels = ["botspam"]
     logs = requests.get(api).json()
     for message in logs:
         title = "Message"
@@ -314,23 +232,26 @@ async def task_loop():
             channel = discord.utils.get(bot.get_all_channels(), name=channel)
             msg = await channel.send(embed=embed)
 
-        api = f"{BOT_API}/ack_log/{message.get('uuid')}/"
-        logger.info(f"🌍 Ack log '{message.get('uuid')}'...")
-        requests.get(api, headers={"x-dd-bot-token": BOT_TOKEN}).json()
+        uuid = message.get("uuid")
+        if uuid:
+            api = f"{BOT_API}/ack_log/{uuid}/"
+            logger.info(f"🌍 Ack log '{uuid}'...")
+            requests.get(api, headers={"x-dd-bot-token": BOT_TOKEN}).json()
 
-    # Display any completed jobs
 
+async def processCompletedJobs():
     api = f"{BOT_API}/queue/complete/"
-    logger.info(f"🌍 Getting completed jobs from '{api}'...")
+    # logger.info(f"🌍 Getting completed jobs from '{api}'...")
     completedJobs = requests.get(api).json()
     if len(completedJobs) == 0:
         logger.info("No completed jobs.")
     else:
-        logger.info(f"{len(completedJobs)} found...")
+        logger.info(f"{len(completedJobs)} completed jobs found...")
         for completedJob in completedJobs:
             logger.info(f"Found completed job: {completedJob.get('uuid')} | Render Type: {completedJob.get('render_type')}")
 
             render_type = completedJob.get("render_type")
+            nsfw = completedJob.get("nsfw")
 
             if render_type is None:
                 render_type = "render"
@@ -342,7 +263,15 @@ async def task_loop():
                 channel = "mutations"
             if render_type == "dream":
                 channel = "day-dreams"
-            channels = ["images-discussion", channel]
+            if render_type == "nightmare":
+                channel = "nightmare-fuel"
+            if nsfw == "yes":
+                channel = "nightmare-fuel"
+
+            if channel != "nightmare-fuel":
+                channels = ["images-discussion", channel]
+            else:
+                channels = [channel]
 
             for channel in channels:
                 channel = discord.utils.get(bot.get_all_channels(), name=channel)
@@ -373,11 +302,12 @@ async def task_loop():
                     await channel.send(f"💀 Cannot display {completedJob.get('uuid')}\n`{tb}`")
             updateJob({"uuid": completedJob.get("uuid"), "status": "archived"})
 
-    # Display any failed jobs
 
+async def processFailedJobs():
     api = f"{BOT_API}/queue/failed"
     logger.info(f"🌍 Getting failed jobs from '{api}'...")
     failedJobs = requests.get(api).json()
+    botspam_channels = ["botspam"]
     if len(failedJobs) == 0:
         logger.info("No failures found.")
     else:
@@ -407,11 +337,12 @@ async def task_loop():
                 rejectedCount = 0
             updateJob({"uuid": failedJob.get("uuid"), "status": "rejected", "rejectedCount": rejectedCount})
 
-    # Drop any stalled jobs
 
+async def processStalledJobs():
     api = f"{BOT_API}/queue/stalled"
-    logger.info(f"🌍 Getting stalled jobs from '{api}'...")
+    # logger.info(f"🌍 Getting stalled jobs from '{api}'...")
     stalls = requests.get(api).json()
+    botspam_channels = ["botspam"]
     for stall in stalls:
         for channel in botspam_channels:
             channel = discord.utils.get(bot.get_all_channels(), name=channel)
@@ -422,8 +353,163 @@ async def task_loop():
             )
             await channel.send(embed=embed)
         updateJob({"uuid": stall.get("uuid"), "status": "queued", "agent_id": None, "percent": None, "last_preview": None, "timestamp": datetime.datetime.now()})
-     # Drop any events for performance
-    logger.info("end loop")
+    # Drop any events for performance
+
+
+async def processEvents():
+    api = f"{BOT_API}/events"
+    logger.info(f"🌍 Getting events from '{api}'...")
+    events = requests.get(api, headers={"x-dd-bot-token": BOT_TOKEN}).json()
+    logger.info(f"Processing {len(events)} events...")
+    logger.info(f"🌍 Clearing events from '{api}'...")
+    api = f"{BOT_API}/clearevents"
+    requests.get(api, headers={"x-dd-bot-token": BOT_TOKEN})
+    for event in events:
+        # logger.info("event")
+        title = "Message"
+        embed = discord.Embed(
+            title="Event",
+            description=event.get("event"),
+            color=discord.Colour.blurple(),
+        )
+        # for channel in botspam_channels:
+        #     channel = discord.utils.get(bot.get_all_channels(), name=channel)
+        # await channel.send(embed=embed)
+        event_type = event.get("event")["type"]
+        if event_type == "progress" or event_type == "preview":
+            job_uuid = event.get("event")["job_uuid"]
+            logger.info(f"⏱️ Progress Update found for {job_uuid}")
+            api = f"{BOT_API}/job/{job_uuid}"
+            # logger.info(f"🌍 Getting job from '{api}'...")
+            job = requests.get(api).json()
+            if job.get("last_preview"):
+                # logger.info(type(job.get("last_preview")))
+                if type(job.get("last_preview")) is str:
+                    strdate = job.get("last_preview")
+                    last_preview = datetime.datetime.strptime(strdate, "%Y-%m-%d %H:%M:%S.%f")
+                else:
+                    strdate = job.get("last_preview")["$date"]
+                    try:
+                        last_preview = datetime.datetime.strptime(strdate, "%Y-%m-%dT%H:%M:%S.%fZ")
+                    except:
+                        last_preview = datetime.datetime.strptime(strdate, "%Y-%m-%dT%H:%M:%SZ")
+            else:
+                # logger.info("No last preview...")
+                last_preview = None
+            # last_preview = datetime.datetime(job.get("last_preview")["$date"])
+            toosoon = False
+            if last_preview == None:
+                toosoon = False
+            else:
+                n = datetime.datetime.now()
+                duration = n - last_preview
+                # logger.info(duration)
+                if duration.total_seconds() < 60:
+                    toosoon = True
+                if job:
+                    updateJob({"uuid": job_uuid, "last_preview": datetime.datetime.now()})
+                    if job.get("status") == "processing" and toosoon == False:
+                        embed, file, view = retrieve(job_uuid)
+                        logger.info(f"⬆️ Updating progress in discord for {job.get('uuid')}")
+                        if embed:
+                            render_type = job.get("render_type")
+                            nsfw = job.get("nsfw")
+                            if render_type is None:
+                                render_type = "render"
+                            if render_type == "sketch":
+                                channel = "sketches"
+                            if render_type == "render":
+                                channel = "images"
+                            if render_type == "mutate":
+                                channel = "mutations"
+                            if render_type == "dream":
+                                channel = "day-dreams"
+                            if render_type == "nightmare":
+                                channel = "nightmare-fuel"
+                            if nsfw == "yes":
+                                channel = "nightmare-fuel"
+
+                            logger.info(f"🤩 {channel}")
+                            channel = discord.utils.get(bot.get_all_channels(), name=channel)
+                            # logger.info(f"Updating message {job.get('progress_msg')}...")
+                            try:
+                                if job.get("progress_msg"):
+                                    msgid = job.get("progress_msg")
+                                else:
+                                    msg = await channel.send(embed=embed, view=view)
+                                    updateJob({"uuid": job.get("uuid"), "progress_msg": msg.id})
+                                    msgid = msg.id
+                                message = await channel.fetch_message(msgid)
+                                if file:
+                                    if DISCORD_UPLOAD_FILES:
+                                        await message.edit(file=file, view=view, embed=embed)
+                                    else:
+                                        await message.edit(embed=embed, view=view)
+                                else:
+                                    await message.edit(embed=embed, view=view)
+                            except:
+                                # logger.error(f"Could not update message {job.get('progress_msg')}")
+                                pass
+                        else:
+                            logger.error("no embed")
+            # Acknowledge (delete) event
+            # api = f"{BOT_API}/ack_event/{event.get('uuid')}"
+            # requests.get(api, headers={"x-dd-bot-token": BOT_TOKEN}).json()
+
+
+async def measure(fn):
+    n = datetime.now()
+    fn()
+    e = datetime.now()
+    t = e - n
+    logger.info(f"⏱️ Task took {t} seconds")
+
+
+# this code will be executed every 10 seconds after the bot is ready
+@tasks.loop(seconds=10)
+async def task_loop():
+    global ticks
+    ticks += 1
+    botspam_channels = ["botspam"]
+    logger.info("🚩 Start of Loop 🚩")
+
+    # Queue Stats
+    logger.info("📜 Updating Queue Stats")
+    await queue_status()
+
+    # Agents
+    logger.info("📜 Updating Agent Status")
+    await agent_status()
+
+    # Active
+    logger.info("📜 Updating Active Queue")
+    await queueBroadcast("all", "processing", None, DISCORD_ACTIVE_JOBS, "active")
+
+    # Waiting
+    logger.info("📜 Updating Waiting Queue")
+    await queueBroadcast("all", "queued", None, DISCORD_WAITING_JOBS, "waiting")
+
+    # Process any Events
+    logger.info("🏁 Checking Events...")
+    await processEvents()
+
+    # Display any new messages
+    logger.info("🪵 Processing Logs...")
+    await processLogs()
+
+    # Display any completed jobs
+    logger.info("🏁 Processing Completed Jobs...")
+    await processCompletedJobs()
+
+    # Display any failed jobs
+    logger.info("😭 Processing Failed Jobs...")
+    await processFailedJobs()
+
+    # Drop any stalled jobs
+    logger.info("😠 Processing Stalled Jobs...")
+    await processStalledJobs()
+
+    logger.info("🛑 End of Loop 🛑")
 
 
 class MyModal(Modal):
@@ -460,6 +546,7 @@ async def refresh(ctx, job_uuid):
     await ctx.respond("Acknowledged.", ephemeral=True)
     await do_refresh(job_uuid)
 
+
 @discord.ext.commands.has_any_role("admin")
 @bot.slash_command(name="refresh_all", description="Refresh all images (temporary utility command)")
 async def refresh_all(ctx):
@@ -470,14 +557,15 @@ async def refresh_all(ctx):
         max = 10000000
         m = 0
         for job in jobs:
-            if(job.get('progress_msg')):
+            if job.get("progress_msg"):
                 m += 1
                 if m < max:
-                    do_refresh(job.get('uuid'))
+                    do_refresh(job.get("uuid"))
                 else:
                     logger.info(f"{job.get('uuid')} max update reached...")
             else:
                 logger.info("no")
+
 
 async def do_refresh(job_uuid):
     embed, file, view = retrieve(job_uuid)
@@ -576,7 +664,7 @@ def retrieve(uuid):
     if status == "queued":
         color = discord.Colour.blurple()
     # logger.info(f"{uuid} - {status}")
-    details = f"[Job]({BOT_API}/job/{job.get('uuid')}) | [Config]({BOT_API}/config/{job.get('uuid')}) | [Web]({BOT_WEBSITE}/piece/{job.get('uuid')})"
+    details = f"[Job]({BOT_PUBLIC_API}/job/{job.get('uuid')}) | [Config]({BOT_PUBLIC_API}/config/{job.get('uuid')}) | [Web]({BOT_WEBSITE}/piece/{job.get('uuid')})"
     if job.get("parent_uuid"):
         details = f"{details} | Parent: `{job.get('parent_uuid')}`"
     embed = discord.Embed(
@@ -584,30 +672,17 @@ def retrieve(uuid):
         color=color,
         fields=[
             discord.EmbedField("Author", f"<@{job.get('author')}>", inline=True),
+            discord.EmbedField("Status", f"`{job.get('status')}`", inline=True),
             discord.EmbedField("Type", f"`{job.get('render_type')}`", inline=True),
             discord.EmbedField("Model", f"`{job.get('model')}`", inline=True),
             discord.EmbedField("Steps", f"`{str(job.get('steps'))}`", inline=True),
             discord.EmbedField("Progress", f"`{str(percent)}%`", inline=True),
             discord.EmbedField("Text Prompt", f"`{job.get('text_prompt')[:500]}`", inline=False),
-            discord.EmbedField("Details", details, inline=True)
-            # discord.EmbedField("Steps", f"`{completedJob.get('steps')}`", inline=True),
-            # discord.EmbedField("CLIP Model", f"`{completedJob.get('model')}`", inline=True),
-            # discord.EmbedField("Diffusion Model", f"`{completedJob.get('diffusion_model')}`", inline=True),
-            # discord.EmbedField("Shape", f"`{completedJob.get('shape')}`", inline=True),
-            # discord.EmbedField("Inner Cut Power", f"`{completedJob.get('cut_ic_pow')}`", inline=True),
-            # discord.EmbedField("Saturation Scale", f"`{completedJob.get('sat_scale')}`", inline=True),
-            # discord.EmbedField("CLIP Guidance Scale", f"`{completedJob.get('clip_guidance_scale')}`", inline=True),
-            # discord.EmbedField("Cut Schedule", f"`{completedJob.get('cut_schedule')}`", inline=True),
-            # discord.EmbedField("Clamp Max", f"`{str(completedJob.get('clamp_max'))}`", inline=True),
-            # discord.EmbedField("Seed", f"`{str(completedJob.get('set_seed'))}`", inline=True),
-            # discord.EmbedField("Symmetry", f"`{str(completedJob.get('symmetry'))}`", inline=True),
-            # discord.EmbedField("Symmetry Loss Scale", f"`{str(completedJob.get('symmetry_loss_scale'))}`", inline=True),
-            # discord.EmbedField("Duration (sec)", f"`{str(math.floor(duration))}`", inline=True),
-            # discord.EmbedField("Memory HWM", f"`{str(completedJob.get('mem_hwm'))}`", inline=True)
+            discord.EmbedField("Details", details, inline=True),
         ],
     )
     embed.set_author(
-        name=job.get('uuid'),
+        name=job.get("uuid"),
         icon_url=BOT_ICON,
     )
     embed.set_footer(text=f"Render time: {str(math.floor(duration))} sec")
@@ -618,19 +693,27 @@ def retrieve(uuid):
     # view.add_item(pinButton)
     preview = job.get("preview")
     fn = ""
+    s3name = ""
     if preview == True:
         fn = f"{uuid}_progress.png"
+        s3name = fn
+
     if status == "archived" or status == "complete":
         fn = job.get("filename")
+        # s3name = f"{fn}0_0.png"       # wtf - look at later...
+        s3name = fn
+
+    # logger.info(fn)
     if fn != "":
         if DISCORD_UPLOAD_FILES:
-            # logger.info(f"Uploading {fn}...")
             file = discord.File(f"{UPLOAD_FOLDER}/{fn}", fn)
             embed.set_image(url=f"attachment://{fn}")
-            # logger.info(f"Upload of {fn} complete.")
         else:
             file = None
-            embed.set_image(url=f"{BOT_PUBLIC_API}/image/{uuid}")
+            r = random.random()
+            url = f"{BOT_S3_WEB}{s3name}"
+            # logger.info(f"Pointing image to {url}...")
+            embed.set_image(url=url)
     else:
         file = None
     return embed, file, view
@@ -659,9 +742,9 @@ async def help(
     term: discord.Option(
         str,
         "Term",
-        required=False,
-        default="help",
+        required=True,
         choices=[
+            discord.OptionChoice("Help", value="help"),
             discord.OptionChoice("Text Prompts", value="text_prompts"),
             discord.OptionChoice("Steps", value="steps"),
             discord.OptionChoice("CLIP Guidance Scale", value="clip_guidance_scale"),
@@ -697,6 +780,10 @@ async def help(
         **`ram_efficient`**
         `cut_overview` : `"[10]*200+[8]*200+[5]*200+[2]*200+[2]*200"`
         `cut_innercut` : `"[0]*200+[2]*200+[5]*200+[7]*200+[9]*200"`
+
+        **`potato`**
+        `cut_overview` : `"[1]*1000"`
+        `cut_innercut` : `"[1]*1000"`
         """
     if term == "clamp_max":
         help = """
@@ -734,11 +821,8 @@ async def ping(ctx):  # a slash command will be created with the name "ping"
     await ctx.respond(f"Pong! Latency is {bot.latency}")
 
 
-@bot.event
-async def on_ready():
-    logger.info(f"{bot.user} is ready and online!")
+async def updateUsers():
     members = await bot.guilds[0].fetch_members(limit=1000).flatten()
-
     for member in members:
         logger.info(member.id)
         logger.info(member.name)
@@ -747,16 +831,23 @@ async def on_ready():
             uri = av.url
         else:
             uri = ""
-        updateUser({
-            "user_id": int(member.id),
-            "user_name" : member.name,
-            "display_name" : member.display_name,
-            "discriminator" : member.discriminator,
-            "nick" : member.nick,
-            "avatar" : uri,
-            #"display_avatar" : member.display_avatar
-        })
+        updateUser(
+            {
+                "user_id": int(member.id),
+                "user_name": member.name,
+                "display_name": member.display_name,
+                "discriminator": member.discriminator,
+                "nick": member.nick,
+                "avatar": uri,
+                # "display_avatar" : member.display_avatar
+            }
+        )
 
+
+@bot.event
+async def on_ready():
+    logger.info(f"{bot.user} is ready and online!")
+    await updateUsers()
     task_loop.start()  # important to start the loop
 
 
@@ -784,6 +875,7 @@ async def do_render(
     eta,
     cutn_batches,
     parent_uuid,
+    nsfw
 ):
     reject = False
     reasons = []
@@ -833,6 +925,7 @@ async def do_render(
             "author": int(ctx.author.id),
             "status": "queued",
             "eta": eta,
+            "nsfw": nsfw
         }
 
         r = requests.post(api, data=record, headers={"x-dd-bot-token": BOT_TOKEN})
@@ -848,6 +941,10 @@ async def do_render(
             channel = "mutations"
         if render_type == "dream":
             channel = "day-dreams"
+        if render_type == "nightmare":
+            channel = "nightmare-fuel"
+        if nsfw == "yes":
+            channel = "nightmare-fuel"
 
         channel = discord.utils.get(bot.get_all_channels(), name=channel)
         msg = await channel.send(embed=embed, view=view)
@@ -870,6 +967,16 @@ async def dream(
     u = requests.post(api, data={"author_id": ctx.author.id, "dream": dream}, headers={"x-dd-bot-token": BOT_TOKEN}).json()
     await ctx.respond(f"🌛 Thanks! 🐑", ephemeral=True)
 
+@bot.command(description="Make a nightmare")
+async def nightmare(
+    ctx,
+    dream: discord.Option(str, "Enter your dream", required=True),
+):
+    api = f"{BOT_API}/dream"
+    logger.info(f"🌍 Changing Nightmare '{api}'...")
+    u = requests.post(api, data={"author_id": ctx.author.id, "dream": dream, "is_nightmare" : True}, headers={"x-dd-bot-token": BOT_TOKEN}).json()
+    await ctx.respond(f"💀 Thanks! 🩸", ephemeral=True)
+
 
 @bot.command(description="Stop dreaming")
 async def wakeup(ctx):
@@ -890,7 +997,12 @@ async def mutate(
         "Cut Batches",
         required=False,
         default=4,
-        choices=[discord.OptionChoice("2", value=2), discord.OptionChoice("4", value=4), discord.OptionChoice("8", value=8), discord.OptionChoice("16", value=16)],
+        choices=[
+            discord.OptionChoice("2", value=2), 
+            discord.OptionChoice("4", value=4), 
+            discord.OptionChoice("8", value=8), 
+            # discord.OptionChoice("16", value=16)
+        ],
     ),
     shape: discord.Option(
         str,
@@ -958,6 +1070,16 @@ async def mutate(
         ],
     ),
     symmetry_loss_scale: discord.Option(int, "Symmetry Loss Scale", required=False),
+    nsfw: discord.Option(
+        str,
+        "NSFW tag | 👉 This does NOT mean you can render illegal or sexually explicit content",
+        required=False,
+        default="no",
+        choices=[
+            discord.OptionChoice("No", value="no"),
+            discord.OptionChoice("Yes", value="yes"),
+        ],
+    ),
 ):
 
     result = requests.get(f"{BOT_API}/duplicate/{job_uuid}").json()
@@ -1016,6 +1138,7 @@ async def mutate(
             result["eta"],
             result["cutn_batches"],
             job_uuid,
+            nsfw
         )
     else:
         await ctx.respond("😭 Hmm, couldn't find that one to mutate.")
@@ -1031,7 +1154,12 @@ async def render(
         "Cut Batches",
         required=False,
         default=4,
-        choices=[discord.OptionChoice("2", value=2), discord.OptionChoice("4", value=4), discord.OptionChoice("8", value=8), discord.OptionChoice("16", value=16)],
+        choices=[
+            discord.OptionChoice("2", value=2), 
+            discord.OptionChoice("4", value=4), 
+            discord.OptionChoice("8", value=8), 
+            # discord.OptionChoice("16", value=16)
+        ],
     ),
     shape: discord.Option(
         str,
@@ -1104,6 +1232,16 @@ async def render(
         ],
     ),
     symmetry_loss_scale: discord.Option(int, "Symmetry Loss Scale", required=False, default=1500),
+    nsfw: discord.Option(
+        str,
+        "NSFW tag | 👉 This does NOT mean you can render illegal or sexually explicit content",
+        required=False,
+        default="no",
+        choices=[
+            discord.OptionChoice("No", value="no"),
+            discord.OptionChoice("Yes", value="yes"),
+        ],
+    ),
 ):
     await do_render(
         ctx,
@@ -1124,6 +1262,7 @@ async def render(
         eta,
         cutn_batches,
         None,
+        nsfw
     )
 
 
@@ -1208,6 +1347,16 @@ async def sketch(
             discord.OptionChoice("lsun_uncond_100M_1200K_bs128", value="lsun_uncond_100M_1200K_bs128"),
         ],
     ),
+    nsfw: discord.Option(
+        str,
+        "NSFW tag | 👉 This does NOT mean you can render illegal or sexually explicit content",
+        required=False,
+        default="no",
+        choices=[
+            discord.OptionChoice("No", value="no"),
+            discord.OptionChoice("Yes", value="yes"),
+        ],
+    ),
 ):
     await do_render(
         ctx,
@@ -1228,6 +1377,7 @@ async def sketch(
         eta,
         cutn_batches,
         None,
+        nsfw
     )
 
 
@@ -1262,6 +1412,7 @@ async def remove(ctx, uuid):
 
 async def channel_erase(job):
     render_type = job.get("render_type")
+    nsfw = job.get("nsfw")
     if render_type is None:
         render_type = "render"
     if render_type == "sketch":
@@ -1272,6 +1423,10 @@ async def channel_erase(job):
         channel = "mutations"
     if render_type == "dream":
         channel = "day-dreams"
+    if render_type == "nightmare":
+        channel = "nightmare-fuel"
+    if nsfw == "yes":
+        channel = "nightmare-fuel"
     channel = discord.utils.get(bot.get_all_channels(), name=channel)
     msg = await channel.fetch_message(job.get("progress_msg"))
     logger.info(f"{msg.id} deleted.")
@@ -1310,17 +1465,17 @@ async def repeat(ctx, job_uuid, set_seed: discord.Option(int, "Seed", required=F
 
 @bot.command(description="Get details of a render request")
 async def query(ctx, uuid):
-    await ctx.respond(f"{BOT_API}/query/{uuid}")
+    await ctx.respond(f"{BOT_PUBLIC_API}/query/{uuid}")
 
 
 @bot.command(description="Search by text")
 async def search(ctx, regexp):
-    await ctx.respond(f"{BOT_API}/search/{regexp}")
+    await ctx.respond(f"{BOT_PUBLIC_API}/search/{regexp}")
 
 
 @bot.command(description="View first 5 rejects")
 async def rejects(ctx):
-    api = f"{BOT_API}/queue/rejected"
+    api = f"{BOT_PUBLIC_API}/queue/rejected"
     await ctx.respond(api, ephemeral=True)
 
 
@@ -1331,6 +1486,7 @@ async def myhistory(ctx):
 
 async def agent_status():
     subject = requests.get(f"{BOT_API}/serverinfo/agentstats").json()
+
     if subject:
         channelid = int(subject["channel"])
         messageid = int(subject["message"])
@@ -1385,7 +1541,9 @@ async def agent_status():
             logger.info(f"{messageid} not found.  Creating new one.")
             msg = await channel.send(f"""```\n{t[:1900]}\n```""")
             messageid = msg.id
-            requests.post(f"{BOT_API}/serverinfo", headers={"x-dd-bot-token": BOT_TOKEN}, data={"subject": "agentstats", "channel": int(channel.id), "message": int(messageid)}).json()
+            requests.post(
+                f"{BOT_API}/serverinfo", headers={"x-dd-bot-token": BOT_TOKEN}, data={"subject": "agentstats", "channel": int(channel.id), "message": int(messageid)}
+            ).json()
     else:
         # await channel.send(embed = embed)
         msg = await channel.send(f"""```\n{t[:1900]}\n```""")
