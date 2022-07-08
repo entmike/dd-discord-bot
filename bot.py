@@ -1115,7 +1115,10 @@ async def mutate(
         if set_seed == -1:
             seed = random.randint(0, 2**32)
         else:
-            seed = result["set_seed"]
+            try:
+                seed = result["set_seed"]
+            except:
+                seed = -1
 
         result["set_seed"] = seed
 

@@ -745,6 +745,25 @@ def serve_pil_image(pil_img):
     img_io.seek(0)
     return send_file(img_io, mimetype="image/jpeg")
 
+def s3_jpg(job_uuid):
+    try:
+        try:
+            url = f"{BOT_S3_WEB}{job_uuid}0_0.png"
+            img = Image.open(urlopen(url))
+        except:
+            url = f"{BOT_S3_WEB}{job_uuid}_progress.png"
+            img = Image.open(urlopen(url))
+
+        jpgfile = f"{job_uuid}.jpg"
+        img.save(jpgfile, "JPEG")
+        upload_file_s3(jpgfile, BOT_S3_BUCKET, f"jpg/{job_uuid}.jpg")
+        os.remove(jpgfile)
+    except Exception as e:
+        import traceback
+
+        tb = traceback.format_exc()
+        return f"Could not locate {url}.  This might be because the render has not completed yet.  Or because the job failed.  Or check your job uuid.  Or a gremlin ate the image.  Probably the gremlin.\n{tb}"
+
 
 def s3_thumbnail(job_uuid, size):
     try:
@@ -993,7 +1012,13 @@ def upload_file(agent_id, job_uuid):
                     s3_thumbnail(job_uuid, 1024)
                     with get_database() as client:
                         client.database.get_collection("queue").update_one({"uuid": job_uuid}, {"$set": {"thumbnails": [64, 128, 256, 512, 1024]}})
-                    logger.info(f"👍 Thumbnails uploaded to s3 for {job_uuid}")
+                        logger.info(f"👍 Thumbnails uploaded to s3 for {job_uuid}")
+
+                    s3_jpg(job_uuid)
+                    with get_database() as client:
+                        client.database.get_collection("queue").update_one({"uuid": job_uuid}, {"$set": {"jpg": True}})
+                        logger.info(f"🖼️ JPEG version for {job_uuid} saved to s3")
+                    
                 except Exception as e:
                     logger.error(e)
             with get_database() as client:
