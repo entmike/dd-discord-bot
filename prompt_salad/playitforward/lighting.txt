@@ -4,3 +4,9 @@ black light
 midnight
 soft light
 dynamic lighting
+crepuscular light rays
+diffused light
+reflected light
+backlight
+sidelight
+frontlight
