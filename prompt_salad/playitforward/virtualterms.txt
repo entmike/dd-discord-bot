@@ -1,0 +1,216 @@
+algorithm
+analog
+app
+array
+backup
+bandwidth
+binary
+bit
+bitmap
+blog
+blogger
+bookmark
+broadband
+browser
+buffer
+bug
+byte
+cache
+caps lock
+CD
+CD-ROM
+captcha
+client
+cloud computing
+compress
+configure
+CPU
+central processing unit
+cyberspace
+computer program
+compile
+computer
+command
+dashboard
+database
+digital
+document
+drag
+data
+debug
+desktop
+disk
+domain
+DVD
+disc
+data mining
+decompress
+development
+DNS
+domain name system
+download
+email
+encrypt
+enter
+emoticon
+file
+finder
+floppy disk
+firmware
+flashdrive
+folder
+frame
+flowchart
+format
+firewall
+gigabyte
+graphics
+hack
+home page
+hacker
+hardware
+html
+hyperlink
+host
+icon
+inbox
+integer
+internet
+interface
+iteration
+IP
+IP address
+java
+joystick
+junk mail
+keyboard
+kernel
+key
+keyword
+laptop
+link
+log out
+logic
+login
+lurking
+macintosh
+macro
+mainframe
+malware
+media
+memory
+mirror
+modem
+monitor
+motherboard
+mouse
+multimedia
+net
+notebook computer
+open source
+output
+network
+offline
+operating system
+node
+online
+option
+page
+path
+podcast
+process
+protocol
+password
+phishing
+platform
+pop-up
+program
+paste
+copy
+plug-in
+portal
+privacy
+programmer
+queue
+QWERTY
+WASD
+RAM
+random access memory
+real-time
+reboot
+resolution
+restore
+ROM
+read only memory
+root
+router
+runtime
+save
+screen
+scroll
+security
+snapshot
+spam
+spyware
+supercomputer
+scan
+screenshot
+scroll bar
+server
+shift
+social networking
+spam
+spammer
+status bar
+scanner
+shell script
+script
+search engine
+shareware
+shift key
+software
+spreadsheet
+storage
+syntax
+table
+template
+thread
+tag
+terabyte
+toolbar
+typeface
+terminal
+text editor
+trash
+undo
+URL
+username
+unix
+user
+utility
+upload
+user interface
+version
+virus
+webmaster
+wiki
+wireless
+world wide web
+WWW
+virtual
+web 
+website
+window
+word processor
+worm
+virtual memory
+web host
+widget
+Windows
+workstation
+XML
+zip
+AI
+artificial intelligence
+deep learning
+deep dream

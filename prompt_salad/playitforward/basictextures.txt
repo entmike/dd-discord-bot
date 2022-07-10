@@ -1,0 +1,109 @@
+smoke
+snow
+leather
+fabric
+cotton
+wooly
+ceramic
+brick
+tile
+marble
+crosshatched
+studded
+crumpled paper
+torn cardboard
+cardboard
+paper
+corrugated cardboard
+rustic wood
+driftwood
+vellum
+plastic
+acrylic plastic
+acrylic paint
+velcro
+foam
+styrofoam
+mesh
+plastic mesh
+frosted glass
+stained glass
+marble
+laminate
+PVC plastic
+balsa wood
+aluminum
+graphite
+neoprene rubber
+silicone rubber
+haplon rubber
+santoprene rubber
+car vinyl
+chrome
+snakeskin
+lacquered vinyl
+smooth vinyl
+canvas vinyl
+madrid vinyl
+corinthian vinyl
+coarse leather
+smooth leather
+coarse suede
+smooth suede
+very soft suede
+crepe de chine
+silk satin
+pimatex cotton
+cotton jersey
+cotton crush
+cotton interlock
+cotton lycra
+cotton velveteen
+coarse cotton
+soft cotton
+cotton candy
+upholstery
+charmeuse satin
+cotton/silk blend
+rayon
+raw silk
+felt jean denim
+bull denim
+flannel
+twill
+tulle
+gauze
+bamboo
+rabbit fur
+leopard shag
+linen cloth
+muslin cloth
+scenery canvas
+scenery muslin
+pineapple fiber
+leaf
+vein
+skin
+rough tile
+smooth tile
+reflective tile
+brick
+stone
+high pile rug
+brushed metal
+hammered metal
+polished metal
+satin metal
+copper metal
+oxidize copper
+rusty metal
+wrought iron
+brass
+stainless steel
+aluminum
+corroded steel
+corroded iron
+corroded copper
+corroded brass
+corroded bronze
+antiqued
