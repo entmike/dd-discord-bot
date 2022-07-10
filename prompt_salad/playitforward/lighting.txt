@@ -2,7 +2,7 @@ volumetric
 spotlight
 black light
 midnight
-soft light
+soft light, soft shadows
 dynamic lighting
 crepuscular light rays
 diffused light
