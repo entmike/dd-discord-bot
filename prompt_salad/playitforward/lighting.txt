@@ -10,3 +10,5 @@ reflected light
 backlight
 sidelight
 frontlight
+low key lighting
+hard light, hard shadows
