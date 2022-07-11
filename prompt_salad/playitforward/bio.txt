@@ -201,3 +201,13 @@ angioomytosis
 tissue
 muscle
 muscle tissue
+bioluminescent
+epidermis
+photosynthesis
+bud
+bud scale
+roots
+sapwood
+spore
+tissue
+xylem
