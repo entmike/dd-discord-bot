@@ -25,6 +25,8 @@ velcro
 foam
 styrofoam
 mesh
+gold leaf
+silver leaf
 plastic mesh
 frosted glass
 stained glass
