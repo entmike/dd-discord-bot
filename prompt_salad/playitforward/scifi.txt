@@ -1,0 +1,108 @@
+bionic
+cibernetic
+mech
+robot
+droid
+motherboard
+pipe
+resonator
+transient
+coupler
+disjoined
+drive
+warp
+chromatic
+dynamic
+fuse
+multiplexer
+blaster
+colloidal
+multi
+macro
+micro
+super
+beam
+cryo
+cryostat
+cyberspace
+ray
+forcefield
+hive
+multiverse
+parallel
+terraform
+time
+articulation
+manipulator
+base
+link
+wire
+cable
+acrylic tube
+coordinates
+assembly
+articulated manipulator
+kuka arm
+centrifuge
+clamp
+contact sensor
+configuration
+device
+controller
+remote
+frame
+cylindrical
+spherical
+hexagonal
+cube
+direct-drive
+switch
+circuit
+degree
+effector
+emitter
+limit
+expander
+error
+gravity
+load
+guide
+inductive
+sensor
+interface
+machine
+mechanics
+input device
+integrate
+integrator
+intelligent
+artificial
+interpolated
+joint
+parallel
+linear
+mirror shift
+mirror
+axis
+motor
+battery
+fuel cell
+cycle
+proximity
+pulse
+quasi-static clamp
+quasi-static
+real-time
+remanufacture
+roll
+safety monitor
+safeguard
+servos
+simulation
+stimulation
+spline
+system integrator
+tool
+vacuum
+vision guided
+vision sensor
