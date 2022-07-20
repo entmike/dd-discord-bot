@@ -182,6 +182,9 @@ async def queue_status():
     - 🖼️ Completed `{queuestats['completedCount']}`
     - 🖼️ Archived `{queuestats['renderedCount']}`
     - 🪲 Rejected `{queuestats['rejectedCount']}`
+
+    Detailed Job Stats [here]({BOT_WEBSITE}/jobs)
+    Agent Status [here]({BOT_WEBSITE}/agentstatus)
     """
     embed.add_field(name="Queue Stats", value=summary, inline=False)
     embed.set_footer(text=f"Last update: {datetime.datetime.now()}")
@@ -200,7 +203,7 @@ async def queue_status():
             message = await channel.fetch_message(messageid)
             await message.edit(embed=embed)
         except:
-            msg = await message.send(embed=embed)
+            msg = await channel.send(embed=embed)
             requests.post(
                 f"{BOT_API}/serverinfo", headers={"x-dd-bot-token": BOT_TOKEN}, data={"subject": "queue_status", "channel": int(channel.id), "message": int(msg.id)}
             ).json()
@@ -478,16 +481,16 @@ async def task_loop():
     await queue_status()
 
     # Agents
-    logger.info("📜 Updating Agent Status")
-    await agent_status()
+    # logger.info("📜 Updating Agent Status")
+    # await agent_status()
 
     # Active
-    logger.info("📜 Updating Active Queue")
-    await queueBroadcast("all", "processing", None, DISCORD_ACTIVE_JOBS, "active")
+    # logger.info("📜 Updating Active Queue")
+    # await queueBroadcast("all", "processing", None, DISCORD_ACTIVE_JOBS, "active")
 
     # Waiting
-    logger.info("📜 Updating Waiting Queue")
-    await queueBroadcast("all", "queued", None, DISCORD_WAITING_JOBS, "waiting")
+    # logger.info("📜 Updating Waiting Queue")
+    # await queueBroadcast("all", "queued", None, DISCORD_WAITING_JOBS, "waiting")
 
     # Process any Events
     logger.info("🏁 Checking Events...")
@@ -664,9 +667,9 @@ def retrieve(uuid):
     if status == "queued":
         color = discord.Colour.blurple()
     # logger.info(f"{uuid} - {status}")
-    details = f"[Job]({BOT_PUBLIC_API}/job/{job.get('uuid')}) | [Config]({BOT_PUBLIC_API}/config/{job.get('uuid')}) | [Web]({BOT_WEBSITE}/piece/{job.get('uuid')})"
-    if job.get("parent_uuid"):
-        details = f"{details} | Parent: `{job.get('parent_uuid')}`"
+    details = f"[Job]({BOT_PUBLIC_API}/job/{job.get('uuid')}) | [Config]({BOT_PUBLIC_API}/config/{job.get('uuid')}) | [Web]({BOT_WEBSITE}/piece/{job.get('uuid')}) | [Mutate]({BOT_WEBSITE}/mutate/{job.get('uuid')})"
+    # if job.get("parent_uuid"):
+    #     details = f"{details} | Parent: `{job.get('parent_uuid')}`"
     embed = discord.Embed(
         # description=,
         color=color,
@@ -1461,11 +1464,6 @@ async def sudo_retry(ctx, uuid):
         await ctx.respond(f"❌ Cannot retry {uuid}", ephemeral=True)
     else:
         await ctx.respond(f"💼 Job marked for retry.", ephemeral=True)
-
-
-@bot.command(description="Repeat a render request")
-async def repeat(ctx, job_uuid, set_seed: discord.Option(int, "Seed", required=False, default=-1)):
-    await ctx.respond("Repeat is obsolete.  Please use `/mutate`.", ephemeral=True)
 
 
 @bot.command(description="Get details of a render request")

@@ -216,9 +216,46 @@ def pin():
         
         return dumps({"message": "Pinned"})
 
-@app.route("/following", methods=["GET","POST"])
+@app.route("/following", methods=["GET"])
 @requires_auth
 def following():
+    current_user = _request_ctx_stack.top.current_user
+    discord_id = current_user["sub"].split("|")[2]
+    logger.info(f"Request for following list by {discord_id}...")
+    with get_database() as client:
+        following = client.database.vw_users.aggregate([
+            { "$match" : { "user_id_str" : str(discord_id) } },
+            { "$lookup": {
+                "as": "following",
+                "from" : "follows",
+                "let" : { "userId" : "$user_id" },
+                "pipeline": [
+                    { "$match": { "$expr": { "$eq": [ "$user_id", "$$userId" ] } } },
+                    { "$lookup" : {
+                    "as" : "details",
+                    "from" : "users",
+                    "let" : {"followId" : "$follow_id"
+                },
+                    "pipeline" : [   
+                        { "$match": {   
+                        "$expr": {
+                            "$eq": [ "$user_id", "$$followId" ]
+                        } 
+                        } },
+                    ]
+                    }},
+                    {
+                    "$unwind": "$details"
+                    }
+                ]
+            }}
+        ])
+        following = list(following)
+        return dumps(following)
+
+@app.route("/following/feed", methods=["GET"])
+@requires_auth
+def following_feed():
     current_user = _request_ctx_stack.top.current_user
     discord_id = int(current_user["sub"].split("|")[2])
     logger.info(f"Request for following feed by {discord_id}...")
@@ -380,6 +417,12 @@ def getsince(seconds):
         queue = client.database.get_collection("queue").find(query)
         return dumps(queue)
 
+
+@app.route("/web/up_next", methods=["GET"])
+def up_next():
+    with get_database() as client:
+        up_next = list(client.database.vw_next_up.find({}))
+        return dumps(up_next)
 
 @app.route("/web/queue/", methods=["GET"], defaults={"status": "all"})
 @app.route("/web/queue/<status>/")
@@ -1247,6 +1290,15 @@ def clearevents():
         logCollection.drop()
     return "dropped events"
 
+@app.route("/web/profile", methods=["POST"])
+@requires_auth
+def web_profile():
+    current_user = _request_ctx_stack.top.current_user
+    discord_id = int(current_user["sub"].split("|")[2])
+    profile = request.json.get("profile")
+    with get_database() as client:
+        client.database.users.update_one({"user_id": discord_id}, {"$set" : {"social" : profile["social"]}})
+    return dumps({"success" : True})
 
 @app.route("/web/mutate", methods=["POST"])
 @requires_auth
@@ -1519,29 +1571,31 @@ def takeorder(agent_id):
                 logger.info(f"{queueCount} priority jobs in queue.")
 
                 
-                if queueCount == 0:
-                    # Check for sketches next
-                    # if model != "custom":   # Legacy Mode
-                    query = {
-                        "status": "queued",
-                        "render_type": "sketch",
-                        # "model": model,
-                    }
-                    queueCount = queueCollection.count_documents(query)
-                    logger.info(f"{queueCount} sketches in queue.")
+                # if queueCount == 0:
+                #     # Check for sketches next
+                #     # if model != "custom":   # Legacy Mode
+                #     query = {
+                #         "status": "queued",
+                #         "render_type": "sketch",
+                #         # "model": model,
+                #     }
+                #     queueCount = queueCollection.count_documents(query)
+                #     logger.info(f"{queueCount} sketches in queue.")
 
-                    if queueCount == 0:
-                        # if model != "custom":   # Legacy Mode
-                        query = {
-                            "status": "queued",
-                            # "model": model,
-                        }
-                        queueCount = queueCollection.count_documents(query)
-                        logger.info(f"{queueCount} renders in queue.")
+                #     if queueCount == 0:
+                #         # if model != "custom":   # Legacy Mode
+                query = {
+                    "status": "queued",
+                    # "model": model,
+                }
+                up_next = list(client.database.vw_next_up.find({}))
+                queueCount = len(up_next)
+                logger.info(f"{queueCount} renders in queue.")
 
                 if queueCount > 0:
                     # Work found
-                    job = queueCollection.find_one({"$query": query, "$orderby": {"timestamp": 1}})
+                    # job = queueCollection.find_one({"$query": query, "$orderby": {"timestamp": 1}})
+                    job = up_next[0]
 
                     results = queueCollection.update_one({"uuid": job.get("uuid")}, {"$set": {"status": "processing", "agent_id": agent_id, "last_preview": datetime.now()}})
                     count = results.modified_count
