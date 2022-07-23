@@ -40,7 +40,7 @@ from db import get_database
 load_dotenv()
 
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER")
-ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "log"}
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "log", "lz4"}
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_STALL_TIMEOUT = 180
 BOT_SALT = os.getenv("BOT_SALT")
@@ -922,7 +922,7 @@ def s3_jpg(job_uuid):
 
         jpgfile = f"{job_uuid}.jpg"
         img.save(jpgfile, "JPEG")
-        upload_file_s3(jpgfile, BOT_S3_BUCKET, f"jpg/{job_uuid}.jpg")
+        upload_file_s3(jpgfile, BOT_S3_BUCKET, f"jpg/{job_uuid}.jpg", {"ContentType": "image/jpeg"})
         os.remove(jpgfile)
     except Exception as e:
         import traceback
@@ -957,7 +957,7 @@ def s3_thumbnail(job_uuid, size):
         img.thumbnail((int(size), int(size)), Image.LANCZOS)
         thumbfile = f"thumb_{size}_{job_uuid}.jpg"
         img.save(thumbfile, "JPEG")
-        upload_file_s3(thumbfile, BOT_S3_BUCKET, f"thumbs/{size}/{job_uuid}.jpg")
+        upload_file_s3(thumbfile, BOT_S3_BUCKET, f"thumbs/{size}/{job_uuid}.jpg", {"ContentType": "image/jpeg"})
         os.remove(thumbfile)
     except Exception as e:
         import traceback
@@ -1303,10 +1303,16 @@ def web_profile():
 @app.route("/web/mutate", methods=["POST"])
 @requires_auth
 def web_mutate():
+    # TODO: Rewrite this
     current_user = _request_ctx_stack.top.current_user
     discord_id = int(current_user["sub"].split("|")[2])
     logger.info(f"Incoming mutation job request from {discord_id}...")
     job = request.json.get("job")
+    experimental = False
+    try:
+        experimental = job["experimental"]
+    except:
+        pass
     try:
         sym = job["symmetry"]
     except:
@@ -1362,6 +1368,7 @@ def web_mutate():
 
     newrecord = {
         "uuid": str(uuid.uuid4()),
+        "experimental" : experimental,
         "parent_uuid": job["uuid"],
         "render_type": "mutate",
         "text_prompt": job["text_prompt"],
@@ -1385,7 +1392,6 @@ def web_mutate():
         "timestamp": str(datetime.utcnow()),
         "origin": "web"
     }
-    logger.info("")
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")
         queueCollection.insert_one(newrecord)
@@ -1504,6 +1510,211 @@ def instructions(agent_id):
                 else:
                     return dumps(None)
 
+def postProcess(job_uuid):
+    # Inspect Document results
+    # https://docarray.jina.ai/fundamentals/document/
+    from docarray import Document
+    from docarray import DocumentArray
+    import io, base64
+    with get_database() as client:
+        job = client.database.queue.find_one({"uuid": job_uuid})
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], job["filename"])
+        
+        # TODO: get rid of "0_0" suffix
+        png = os.path.join(app.config["UPLOAD_FOLDER"], f"{job_uuid}0_0.png")
+        da = DocumentArray.load_binary(filepath)
+        da[0].save_uri_to_file(png)
+        da_tags = da[0].tags
+        logger.info(da_tags)
+        # Annoyed that I can't figure this out.  Gonna write to filesystem
+        # f = io.BytesIO(base64.b64decode(da[0].uri + '=='))
+        
+        ## Color Analysis
+        color_thief = ColorThief(png)
+        dominant_color = color_thief.get_color(quality=1)
+        palette = color_thief.get_palette(color_count=5)
+        client.database.queue.update_one({"uuid": job_uuid}, {"$set": {"dominant_color": dominant_color, "palette": palette}})
+        logger.info(f"🎨 Color analysis for {job_uuid} complete.")
+
+        ## Indexing to Algolia
+        try:
+            # TODO: Support array text_prompts
+            algolia_index(job_uuid)
+            client.database.get_collection("queue").update_one({"uuid": job_uuid}, {"$set": {"indexed": True}})
+            logger.info(f"🔍 Job indexed to Algolia.")
+        except:
+            logger.info("Error trying to submit Algolia index.")
+            pass
+        
+        ## Save thumbnails/jpg and upload to S3
+        if BOT_USE_S3:
+            try:
+                # TODO: remove "0_0" suffix
+                upload_file_s3(png, BOT_S3_BUCKET, f"images/{job_uuid}0_0.png", {"ContentType": "image/png"})
+                s3_thumbnail(job_uuid, 64)
+                s3_thumbnail(job_uuid, 128)
+                s3_thumbnail(job_uuid, 256)
+                s3_thumbnail(job_uuid, 512)
+                s3_thumbnail(job_uuid, 1024)
+                s3_jpg(job_uuid)
+                client.database.get_collection("queue").update_one({"uuid": job_uuid}, {"$set": {"thumbnails": [64, 128, 256, 512, 1024], "jpg": True}})
+                logger.info(f"👍 Thumbnails uploaded to s3 for {job_uuid}")
+                logger.info(f"🖼️ JPEG version for {job_uuid} saved to s3")
+
+            except Exception as e:
+                logger.error(e)
+        
+        ## Mark as postprocessing complete
+        results = client.database.queue.update_one(
+            {"uuid": job_uuid}, {"$set": {"status": "complete", "time_completed" : datetime.now(), "discoart_tags" : da_tags, "results" : None}}
+        )
+
+
+@app.route("/v2/deliverorder", methods=["POST"])
+def v2_deliver():
+    agent_id = request.form.get("agent_id")
+    agent_version = request.form.get("agent_version")
+    job_uuid = request.form.get("uuid")
+
+    if request.form.get("duration"):
+        duration = float(request.form.get("duration"))
+    else:
+        duration = 0.0
+
+    # check if the post request has the file part
+    if "file" not in request.files:
+        return dumps({
+            "success" : False,
+            "message" : "No file received."
+        })
+    file = request.files["file"]
+    if file.filename == "":
+        return dumps({
+            "success" : False,
+            "message" : "No file received."
+        })
+
+    if file and allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        file.save(filepath)
+    else:
+        return dumps({
+            "success" : False,
+            "message" : "Unexpected file type."
+        })
+    
+    # Since payload is saved, update job record.
+    with get_database() as client:
+        client.database.queue.update_one(
+            {"agent_id": agent_id, "uuid": job_uuid},
+            {"$set": {
+                "status" : "uploaded",
+                "agent_version" : agent_version,
+                "filename" : filename,
+                "duration" : duration,
+                "percent" : 100
+            } }
+        )
+    
+    # TODO: Post-processing
+    try:
+        postProcess(job_uuid)
+        return dumps({
+            "success" : True,
+            "message" : "Delivery received!",
+            "duration" : duration
+        })
+    except:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(tb)
+        return dumps({
+            "success" : False,
+            "message" : "Delivery failed!",
+            "traceback" : tb
+        })
+@app.route("/v2/takeorder/<agent_id>", methods=["POST"])
+def v2_takeorder(agent_id):
+     # Make sure agent is registered...
+    with get_database() as client:
+        agent = client.database.agents.find_one({"agent_id": agent_id})
+        if not agent:
+            logger.info(f"Unknown agent looking for work: {agent_id}")
+            return dumps({"message": f"I don't know a {agent_id}.  Did you not register?", "success": False})
+        else:
+            idle_time = request.form.get("idle_time")
+            bot_version = request.form.get("bot_version")
+            pulse(agent_id=agent_id)
+            logger.info(f"{agent_id} looking for work - Idle time: {idle_time}...")
+            mode = "awake"
+            if int(idle_time) > 1800:
+                mode = "dreaming"
+            else:
+                mode = "awake"
+            with get_database() as client:
+                client.database.agents.update_one({"agent_id": agent_id}, {"$set": {
+                    "mode": mode,
+                    "idle_time": int(idle_time),
+                    "bot_version": str(bot_version)
+                    }
+                })
+            logger.info(f"{agent_id} (version {str(bot_version)}) is {mode}, idle time {idle_time} seconds...")
+            # Inform agent if there's already a job assigned...
+        with get_database() as client:
+            queueCollection = client.database.get_collection("queue")
+            query = {
+                "status": "processing",
+                "agent_id": agent_id
+            }
+            jobCount = queueCollection.count_documents(query)
+            if jobCount > 0:
+                # Update status
+                client.database.agents.update_one({"agent_id": agent_id}, {"$set": {"mode": "working", "idle_time": 0}})
+                jobs = queueCollection.find_one(query)
+                logger.info("working")
+                return dumps({"message ": f"You already have a job.  (Job '{jobs.get('uuid')}')", "uuid": jobs.get("uuid"), "details": json.loads(dumps(facelift(jobs))), "success": True})
+            else:
+                # Check for priority jobs first
+                query = {
+                    "status": "queued",
+                    "priority": True,
+
+                }
+                queueCount = queueCollection.count_documents(query)
+                logger.info(f"{queueCount} priority jobs in queue.")
+                # TODO: sketch logic
+                if queueCount == 0:
+                    query = {
+                        "status": "queued"
+                    }
+                    up_next = list(client.database.vw_next_up.find({ "experimental" : True }))
+                    queueCount = len(up_next)
+                    logger.info(f"{queueCount} renders in queue.")
+                    if queueCount > 0:
+                        # Work found
+                        job = up_next[0]
+                        results = queueCollection.update_one({"uuid": job.get("uuid")}, {"$set": {"status": "processing", "agent_id": agent_id, "last_preview": datetime.now()}})
+                        count = results.modified_count
+                        if count > 0:
+                            # Set initial progress
+                            e = {"type": "progress", "agent": agent_id, "job_uuid": job.get("uuid"), "percent": 0, "gpustats": None}
+                            event(e)
+                            client.database.agents.update_one({"agent_id": agent_id}, {"$set": {"mode": "working", "idle_time": 0}})
+                            return dumps({"message": f"Your current job is {job.get('uuid')}.", "uuid": job.get("uuid"), "details": json.loads(dumps(facelift(job))), "success": True})
+                    else:
+                        # No work, see if it's dream time:
+                        logger.info("No user jobs in queue...")
+                        if mode == "awake":
+                            return dumps({"message": f"Could not secure a user job.", "success": False})
+                        if mode == "dreaming":
+                            logger.info("Dream Job incoming.")
+                            d = dream(agent_id)
+                            return dumps(d)
+
+        return dumps({"message": f"No queued jobs at this time.", "success": False})
+    return dumps(None)
+
 @app.route("/takeorder/<agent_id>", methods=["POST"])
 def takeorder(agent_id):
     if request.method == "POST":
@@ -1549,13 +1760,12 @@ def takeorder(agent_id):
 
         # Inform agent if there's already a job assigned...
         with get_database() as client:
-            queueCollection = client.database.get_collection("queue")
+            queueCollection = client.database.queue
             query = {"status": "processing", "agent_id": agent_id}
             jobCount = queueCollection.count_documents(query)
             if jobCount > 0:
                 # Update status
-                agentCollection = client.database.get_collection("agents")
-                agentCollection.update_one({"agent_id": agent_id}, {"$set": {"mode": "working", "idle_time": 0}})
+                client.database.agents.update_one({"agent_id": agent_id}, {"$set": {"mode": "working", "idle_time": 0}})
                 jobs = queueCollection.find_one(query)
                 logger.info("working")
                 return dumps({"message ": f"You already have a job.  (Job '{jobs.get('uuid')}')", "uuid": jobs.get("uuid"), "details": json.loads(dumps(facelift(jobs))), "success": True})
@@ -1570,25 +1780,11 @@ def takeorder(agent_id):
                 queueCount = queueCollection.count_documents(query)
                 logger.info(f"{queueCount} priority jobs in queue.")
 
-                
-                # if queueCount == 0:
-                #     # Check for sketches next
-                #     # if model != "custom":   # Legacy Mode
-                #     query = {
-                #         "status": "queued",
-                #         "render_type": "sketch",
-                #         # "model": model,
-                #     }
-                #     queueCount = queueCollection.count_documents(query)
-                #     logger.info(f"{queueCount} sketches in queue.")
-
-                #     if queueCount == 0:
-                #         # if model != "custom":   # Legacy Mode
                 query = {
                     "status": "queued",
                     # "model": model,
                 }
-                up_next = list(client.database.vw_next_up.find({}))
+                up_next = list(client.database.vw_next_up.find({ "experimental" : { "$ne" : True }}))
                 queueCount = len(up_next)
                 logger.info(f"{queueCount} renders in queue.")
 
