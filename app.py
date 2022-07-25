@@ -1308,89 +1308,46 @@ def web_mutate():
     discord_id = int(current_user["sub"].split("|")[2])
     logger.info(f"Incoming mutation job request from {discord_id}...")
     job = request.json.get("job")
-    experimental = False
-    try:
-        experimental = job["experimental"]
-    except:
-        pass
-    try:
-        sym = job["symmetry"]
-    except:
-        sym = "no"
-    try:
-        sls = job["symmetry_loss_scale"]
-    except:
-        sls = 0
-    try:
-        eta = job["eta"]
-    except:
-        eta = 0.8
-    try:
-        shape = job["shape"]
-    except:
-        shape = "landscape"
-    try:
-        model = job["model"]
-    except:
-        model = "default"
-    try:
-        diffusion_model = job["diffusion_model"]
-    except:
-        diffusion_model = "512x512_diffusion_uncond_finetune_008100"
-    try:
-        cut_schedule = job["cut_schedule"]
-    except:
-        cut_schedule = "default"
-    try:
-        clip_guidance_scale = job["clip_guidance_scale"]
-    except:
-        clip_guidance_scale = 5000
-    try:
-        cut_ic_pow = job["cut_ic_pow"]
-    except:
-        cut_ic_pow = 1
-    try:
-        clamp_max = job["clamp_max"]
-    except:
-        clamp_max = 0.05
-    try:
-        sat_scale = job["sat_scale"]
-    except:
-        sat_scale = 0
-    try:
-        cutn_batches = job["cutn_batches"]
-    except:
-        cutn_batches = 4
-    try:
-        nsfw = job["nsfw"]
-    except:
-        nsfw = "no"
 
     newrecord = {
         "uuid": str(uuid.uuid4()),
-        "experimental" : experimental,
+        "experimental" : True,
         "parent_uuid": job["uuid"],
         "render_type": "mutate",
-        "text_prompt": job["text_prompt"],
-        "steps": job["steps"],
-        "shape": shape,
-        "model": model,
-        "diffusion_model": diffusion_model,
-        "symmetry": sym,
-        "symmetry_loss_scale": sls,
-        "cut_schedule": cut_schedule,
-        "clip_guidance_scale": clip_guidance_scale,
-        "clamp_max": clamp_max,
-        "set_seed": job["set_seed"],
-        "cut_ic_pow": cut_ic_pow,
-        "cutn_batches": cutn_batches,
-        "sat_scale": sat_scale,
-        "nsfw": nsfw,
+        "nsfw": job["nsfw"],
         "author": discord_id,
         "status": "queued",
-        "eta": eta,
         "timestamp": str(datetime.utcnow()),
-        "origin": "web"
+        "origin": "web",
+        # deprecated
+        "text_prompt": job["text_prompt"],
+        "model": "default",
+        "shape": "square",
+        "cut_schedule": "default",
+        # Params
+        "text_prompts": job["text_prompts"],
+        "steps": job["steps"],
+        "skip_steps": job["skip_steps"],
+        "diffusion_model": job["diffusion_model"],
+        "diffusion_sampling_mode": job["diffusion_sampling_mode"],
+        "use_horizontal_symmetry": job["use_horizontal_symmetry"],
+        "use_vertical_symmetry": job["use_vertical_symmetry"],
+        "cutn_batches": job["cutn_batches"],
+        "cut_overview": job["cut_overview"],
+        "cut_ic_pow": job["cut_ic_pow"],
+        "cut_innercut": job["cut_innercut"],
+        "cut_icgray_p": job["cut_icgray_p"],
+        "clamp_grad": job["clamp_grad"],
+        "clamp_max": job["clamp_max"],
+        "clip_models": job["clip_models"],
+        "clip_guidance_scale": job["clip_guidance_scale"],
+        "set_seed": job["set_seed"],
+        "seed": job["set_seed"],
+        "sat_scale": job["sat_scale"],
+        "range_scale": job["range_scale"],
+        "eta": job["eta"],
+        "use_secondary_model": job["use_secondary_model"],
+        "width_height": job["width_height"],
     }
     with get_database() as client:
         queueCollection = client.database.get_collection("queue")

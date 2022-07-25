@@ -993,6 +993,13 @@ async def wakeup(ctx):
 async def mutate(
     ctx,
     job_uuid: discord.Option(str, "Job UUID to mutate", required=True),
+):
+    await ctx.respond(f"https://www.feverdreams.app/mutate/{job_uuid}")
+
+
+async def mutateX(
+    ctx,
+    job_uuid: discord.Option(str, "Job UUID to mutate", required=True),
     text_prompt: discord.Option(str, "Enter your text prompt", required=False),
     steps: discord.Option(int, "Number of steps", required=False),
     cutn_batches: discord.Option(
