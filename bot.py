@@ -61,12 +61,17 @@ agents = []
 ticks = 0
 
 
-def updateJob(data):
+def updateJob(data, algo = "disco"):
     """
     Updates a Job by `uuid` via API call.
     """
-    api = f"{BOT_API}/updatejob"
-    logger.info(f"🌍 Updating Job '{data}'...")
+    if algo == "disco":
+        api = f"{BOT_API}/updatejob"
+    
+    if algo == "stable":
+        api = f"{BOT_API}/alpha/updatejob"
+
+    logger.info(f"🌍 Updating Job '{data}' ({algo})...")
     try:
         r = requests.post(api, data=data, headers={"x-dd-bot-token": BOT_TOKEN}, timeout=10).json()
         logger.info("Job updated.")
@@ -243,102 +248,121 @@ async def processLogs():
 
 
 async def processCompletedJobs():
-    api = f"{BOT_API}/queue/complete/"
-    # logger.info(f"🌍 Getting completed jobs from '{api}'...")
-    completedJobs = requests.get(api).json()
-    if len(completedJobs) == 0:
-        logger.info("No completed jobs.")
-    else:
-        logger.info(f"{len(completedJobs)} completed jobs found...")
-        for completedJob in completedJobs:
-            logger.info(f"Found completed job: {completedJob.get('uuid')} | Render Type: {completedJob.get('render_type')}")
+    for kind in [{
+        "url":f"{BOT_API}/queue/complete/",
+        "algo": "disco"
+    },{
+        "url":f"{BOT_API}/stable_jobs/complete/",
+        "algo": "stable"
+    }]:
+        api = kind["url"]
+        algo = kind["algo"]
+        logger.info(f"🌍 Getting completed {algo} jobs from '{api}'...")
+        completedJobs = requests.get(api).json()
+        if len(completedJobs) == 0:
+            logger.info("No completed jobs.")
+        else:
+            logger.info(f"{len(completedJobs)} completed jobs found...")
+            for completedJob in completedJobs:
+                if algo == "disco":
+                    logger.info(f"Found completed job: {completedJob.get('uuid')} | Render Type: {completedJob.get('render_type')}")
+                    render_type = completedJob.get("render_type")
+                
+                nsfw = completedJob.get("nsfw")
+                
+                if algo == "disco":
+                    channel = "images"
+                    
+                    if completedJob.get("diffusion_model") in ["portrait_generator_v001_ema_0.9999_1MM","portrait_generator_v1.5_ema_0.9999_165000","portrait_generator_v003","portrait_generator_v004"]:
+                        channel = "portraits"
+                    
+                    if completedJob.get("diffusion_model") in ["IsometricDiffusionRevrart512px"]:
+                        channel = "isometric"
 
-            render_type = completedJob.get("render_type")
-            nsfw = completedJob.get("nsfw")
+                    if completedJob.get("diffusion_model") in ["PaintPourDiffusion_v1.0", "PaintPourDiffusion_v1.1", "PaintPourDiffusion_v1.2", "PaintPourDiffusion_v1.3"]:
+                        channel = "paint-pour"
 
-            if render_type is None:
-                render_type = "render"
-            if render_type == "sketch":
-                channel = "sketches"
-            if render_type == "render":
-                channel = "images"
-            if render_type == "mutate":
-                channel = "mutations"
-            if render_type == "dream":
-                channel = "day-dreams"
-            if render_type == "nightmare":
-                channel = "nightmare-fuel"
-            if nsfw == "yes":
-                channel = "nightmare-fuel"
+                    if completedJob.get("diffusion_model") in ["pixel_art_diffusion_hard_256","pixel_art_diffusion_soft_256","pixelartdiffusion4k"]:
+                        channel = "pixel-art"
 
-            if channel != "nightmare-fuel":
-                channels = ["images-discussion", channel]
-            else:
+                    if completedJob.get("diffusion_model") in ["512x512_diffusion_uncond_entmike_landscapes_010000","512x512_diffusion_uncond_entmike_landscapes_020000","512x512_diffusion_uncond_entmike_landscapes_070000","512x512_diffusion_uncond_entmike_landscapes_130000"]:
+                        channel = "landscapes-test"
+                    
+                    if completedJob.get("diffusion_model") in ["512x512_diffusion_uncond_entmike_ffhq_025000","512x512_diffusion_uncond_entmike_ffhq_145000","512x512_diffusion_uncond_entmike_ffhq_260000","512x512_diffusion_uncond_entmike_landscapes_130000"]:
+                        channel = "ffhq-test"
+
+                    # if completedJob.get("diffusion_model") in ["512x512_diffusion_uncond_finetune_008100","256x256_diffusion_uncond"]:
+                    #     channel = "images"
+
+                    if render_type == "nightmare":
+                        channel = "nightmare-fuel"
+                    
+                    if nsfw == "yes":
+                        channel = "nightmare-fuel"
+                if algo == "stable":
+                    channel = "test-pilot-chamber"
+
                 channels = [channel]
 
-            for channel in channels:
-                channel = discord.utils.get(bot.get_all_channels(), name=channel)
-                try:
-                    embed, file, view = retrieve(completedJob.get("uuid"))
-                    if completedJob.get("progress_msg"):
-                        try:
-                            message = await channel.fetch_message(completedJob.get("progress_msg"))
-                        except:
-                            message = None
-                        if message:
-                            if DISCORD_UPLOAD_FILES:
-                                # Not sure why, but it fixes images showing up outside of embed
-                                await message.edit(view=view, file=file, embed=embed)
-                                # await message.edit(embed=embed)
-                            else:
-                                await message.edit(embed=embed, view=view)
-                        else:
-                            logger.info(f"Sending new message to {channel.name}")
-                            await channel.send(embed=embed, view=view, file=file)
-                    else:
-                        if DISCORD_UPLOAD_FILES:
-                            await channel.send(embed=embed, view=view, file=file)
-                        else:
-                            await channel.send(embed=embed, view=view)
-                except Exception as e:
-                    tb = traceback.format_exc()
-                    await channel.send(f"💀 Cannot display {completedJob.get('uuid')}\n`{tb}`")
-            updateJob({"uuid": completedJob.get("uuid"), "status": "archived"})
+                for channel in channels:
+                    channel = discord.utils.get(bot.get_all_channels(), name=channel)
+                    try:
+                        if algo == "disco":
+                            await channel.send(f"https://www.feverdreams.app/piece/{completedJob.get('uuid')}")
+                        if algo == "stable":
+                            await channel.send(f"<@{completedJob.get('author')}> `{completedJob.get('prompt')}` Seed: `{completedJob.get('seed')}`" f"https://images.feverdreams.app/images/{completedJob.get('uuid')}.png")
+                    except Exception as e:
+                        tb = traceback.format_exc()
+                        await channel.send(f"💀 Cannot display {completedJob.get('uuid')}\n`{tb}`")
+                
+                
+                updateJob({"uuid": completedJob.get("uuid"), "status": "archived"}, algo = algo)
+                
 
 
 async def processFailedJobs():
-    api = f"{BOT_API}/queue/failed"
-    logger.info(f"🌍 Getting failed jobs from '{api}'...")
-    failedJobs = requests.get(api).json()
-    botspam_channels = ["botspam"]
-    if len(failedJobs) == 0:
-        logger.info("No failures found.")
-    else:
-        for failedJob in failedJobs:
-            for channel in botspam_channels:
-                channel = discord.utils.get(bot.get_all_channels(), name=channel)
-                embed = discord.Embed(
-                    title="😭 Failure 😭",
-                    description=f"Job `{failedJob.get('uuid')}` failed, <@{failedJob.get('author')}>!  Blame `{failedJob.get('agent_id')}`",
-                    color=discord.Colour.blurple(),
-                )
-                tb = failedJob.get("traceback")
-                if tb:
-                    tb = tb[-600:]
-                    embed.add_field(name="Traceback", value=f"```{tb}```", inline=False)
-
-                log = failedJob.get("log")
-                if log:
-                    log = log[-300:]
-                    embed.add_field(name="Log", value=f"```{log}```", inline=False)
-                # embed, file, view = retrieve(failedJob.get('uuid'))
-                await channel.send(embed=embed)
-            rejectedCount = failedJob.get("reject_count")
-            if rejectedCount:
-                rejectedCount += 1
-            else:
-                rejectedCount = 0
-            updateJob({"uuid": failedJob.get("uuid"), "status": "rejected", "rejectedCount": rejectedCount})
+    for kind in [{
+        "url":f"{BOT_API}/queue/failed/",
+        "algo": "disco"
+    },{
+        "url":f"{BOT_API}/stable_jobs/failed/",
+        "algo": "stable"
+    }]:
+        api = kind["url"]
+        algo = kind["algo"]
+        logger.info(f"🌍 Getting failed jobs from '{api}' ({algo})...")
+        failedJobs = requests.get(api).json()
+        botspam_channels = ["botspam"]
+        if len(failedJobs) == 0:
+            logger.info("No failures found.")
+        else:
+            for failedJob in failedJobs:
+                for channel in botspam_channels:
+                    channel = discord.utils.get(bot.get_all_channels(), name=channel)
+                    embed = discord.Embed(
+                        title="😭 Failure 😭",
+                        description=f"Job failed.",
+                        color=discord.Colour.red(),
+                    )
+                    embed.add_field(name="Author", value=f"<@{failedJob.get('author')}>", inline=False)
+                    embed.add_field(name="Job", value=f"{BOT_WEBSITE}/piece/{failedJob.get('uuid')}", inline=False)
+                    embed.add_field(name="GPU Agent", value=f"{BOT_WEBSITE}/agentstatus/{failedJob.get('agent_id')}/1", inline=False)
+                    tb = failedJob.get("traceback")
+                    if tb:
+                        tb = tb[-500:]
+                        embed.add_field(name="Traceback", value=f"```{tb}```", inline=False)
+                    log = failedJob.get("log")
+                    if log:
+                        log = log[-300:]
+                        embed.add_field(name="Log", value=f"```{log}```", inline=False)
+                    # embed, file, view = retrieve(failedJob.get('uuid'))
+                    await channel.send(embed=embed)
+                rejectedCount = failedJob.get("reject_count")
+                if rejectedCount:
+                    rejectedCount += 1
+                else:
+                    rejectedCount = 0
+                updateJob({"uuid": failedJob.get("uuid"), "status": "rejected", "rejectedCount": rejectedCount}, algo=algo)
 
 
 async def processStalledJobs():
@@ -493,12 +517,12 @@ async def task_loop():
     # await queueBroadcast("all", "queued", None, DISCORD_WAITING_JOBS, "waiting")
 
     # Process any Events
-    logger.info("🏁 Checking Events...")
-    await processEvents()
+    # logger.info("🏁 Checking Events...")
+    # await processEvents()
 
     # Display any new messages
-    logger.info("🪵 Processing Logs...")
-    await processLogs()
+    # logger.info("🪵 Processing Logs...")
+    # await processLogs()
 
     # Display any completed jobs
     logger.info("🏁 Processing Completed Jobs...")
@@ -513,36 +537,6 @@ async def task_loop():
     await processStalledJobs()
 
     logger.info("🛑 End of Loop 🛑")
-
-
-class MyModal(Modal):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.add_item(InputText(label="Short Input", placeholder="Placeholder Test"))
-
-        self.add_item(
-            InputText(
-                custom_id="text_prompt",
-                label="Text Prompt",
-                value="lighthouses on artstation",
-                style=discord.InputTextStyle.long,
-            )
-        )
-        self.add_item(
-            InputText(
-                label="Steps",
-                custom_id="steps",
-                value=150,
-                style=discord.InputTextStyle.short,
-            )
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        embed = discord.Embed(title="Your Modal Results", color=discord.Color.random())
-        embed.add_field(name="First Input", value=self.children[0].value, inline=False)
-        embed.add_field(name="Second Input", value=self.children[1].value, inline=False)
-        await interaction.response.send_message(embeds=[embed])
-
 
 @bot.slash_command(name="refresh", description="Refresh an image (temporary utility command)")
 async def refresh(ctx, job_uuid):
@@ -667,20 +661,37 @@ def retrieve(uuid):
     if status == "queued":
         color = discord.Colour.blurple()
     # logger.info(f"{uuid} - {status}")
-    details = f"[Job]({BOT_PUBLIC_API}/job/{job.get('uuid')}) | [Config]({BOT_PUBLIC_API}/config/{job.get('uuid')}) | [Web]({BOT_WEBSITE}/piece/{job.get('uuid')}) | [Mutate]({BOT_WEBSITE}/mutate/{job.get('uuid')})"
+    details = f"[Job]({BOT_PUBLIC_API}/job/{job.get('uuid')}) | [Web]({BOT_WEBSITE}/piece/{job.get('uuid')}) | [Mutate]({BOT_WEBSITE}/mutate/{job.get('uuid')})"
     # if job.get("parent_uuid"):
     #     details = f"{details} | Parent: `{job.get('parent_uuid')}`"
+    tp = job.get('text_prompts')
+    
+    if tp:
+        if "0" in tp:
+            tp = tp["0"]
+    else:
+        tp = ""
+
+    tp = str(tp)
+    tp = tp[:500]
+    cm = job.get('clip_models')
+    if cm != None:
+        cm = ','.join(cm)
+    else:
+        cm = ""
+
     embed = discord.Embed(
         # description=,
         color=color,
         fields=[
             discord.EmbedField("Author", f"<@{job.get('author')}>", inline=True),
-            discord.EmbedField("Status", f"`{job.get('status')}`", inline=True),
-            discord.EmbedField("Type", f"`{job.get('render_type')}`", inline=True),
-            discord.EmbedField("Model", f"`{job.get('model')}`", inline=True),
-            discord.EmbedField("Steps", f"`{str(job.get('steps'))}`", inline=True),
+            # discord.EmbedField("Status", f"`{job.get('status')}`", inline=True),
             discord.EmbedField("Progress", f"`{str(percent)}%`", inline=True),
-            discord.EmbedField("Text Prompt", f"`{job.get('text_prompt')[:500]}`", inline=False),
+            discord.EmbedField("Type", f"`{job.get('render_type')}`", inline=True),
+            discord.EmbedField("CLIP Model", f"`{cm}`", inline=True),
+            discord.EmbedField("Diffusion Model", f"`{job.get('diffusion_model')}`", inline=True),
+            discord.EmbedField("Steps", f"`{str(job.get('steps'))}`", inline=True),
+            discord.EmbedField("Text Prompt", f"`{tp}`", inline=False),
             discord.EmbedField("Details", details, inline=True),
         ],
     )
@@ -705,7 +716,7 @@ def retrieve(uuid):
         fn = job.get("filename")
         # s3name = f"{fn}0_0.png"       # wtf - look at later...
         s3name = fn
-
+        s3name=f"jpg/{uuid}.jpg"
     # logger.info(fn)
     if fn != "":
         if DISCORD_UPLOAD_FILES:
@@ -714,8 +725,8 @@ def retrieve(uuid):
         else:
             file = None
             r = random.random()
-            url = f"{BOT_S3_WEB}{s3name}"
-            # logger.info(f"Pointing image to {url}...")
+            url = f"https://images.feverdreams.app/{s3name}"
+            logger.info(f"Pointing image to {url}...")
             embed.set_image(url=url)
     else:
         file = None
@@ -850,13 +861,13 @@ async def updateUsers():
 @bot.event
 async def on_ready():
     logger.info(f"{bot.user} is ready and online!")
-    await updateUsers()
+    # await updateUsers()
     task_loop.start()  # important to start the loop
 
 
 @bot.event
 async def on_member_join(member):
-    await member.send(f"Welcome to the server, {member.mention}! Enjoy your stay here.  Type `/render` to get started.")
+    await member.send(f"Welcome to the server, {member.mention}! Enjoy your stay here.  Visit https://www.feverdreams.app/mutate/default-lighthouse to get started creating!")
 
 
 async def do_render(
@@ -962,31 +973,30 @@ async def do_render(
 
 @bot.command(description="Make a dream")
 async def dream(
-    ctx,
-    dream: discord.Option(str, "Enter your dream", required=True),
+    ctx
 ):
-    api = f"{BOT_API}/dream"
-    logger.info(f"🌍 Changing Dream '{api}'...")
-    u = requests.post(api, data={"author_id": ctx.author.id, "dream": dream}, headers={"x-dd-bot-token": BOT_TOKEN}).json()
-    await ctx.respond(f"🌛 Thanks! 🐑", ephemeral=True)
+    # api = f"{BOT_API}/dream"
+    # logger.info(f"🌍 Changing Dream '{api}'...")
+    # u = requests.post(api, data={"author_id": ctx.author.id, "dream": dream}, headers={"x-dd-bot-token": BOT_TOKEN}).json()
+    await ctx.respond(f"🌛 https://www.feverdreams.app/dream")
 
-@bot.command(description="Make a nightmare")
-async def nightmare(
-    ctx,
-    dream: discord.Option(str, "Enter your dream", required=True),
-):
-    api = f"{BOT_API}/dream"
-    logger.info(f"🌍 Changing Nightmare '{api}'...")
-    u = requests.post(api, data={"author_id": ctx.author.id, "dream": dream, "is_nightmare" : True}, headers={"x-dd-bot-token": BOT_TOKEN}).json()
-    await ctx.respond(f"💀 Thanks! 🩸", ephemeral=True)
+# @bot.command(description="Make a nightmare")
+# async def nightmare(
+#     ctx,
+#     dream: discord.Option(str, "Enter your dream", required=True),
+# ):
+#     api = f"{BOT_API}/dream"
+#     logger.info(f"🌍 Changing Nightmare '{api}'...")
+#     u = requests.post(api, data={"author_id": ctx.author.id, "dream": dream, "is_nightmare" : True}, headers={"x-dd-bot-token": BOT_TOKEN}).json()
+#     await ctx.respond(f"💀 Thanks! 🩸", ephemeral=True)
 
 
-@bot.command(description="Stop dreaming")
-async def wakeup(ctx):
-    api = f"{BOT_API}/awaken/{ctx.author.id}"
-    logger.info(f"🌍 Waking up '{api}'...")
-    u = requests.get(api).json()
-    await ctx.respond(f"🌄 I'm awake.  Dreams stopped. 👀", ephemeral=True)
+# @bot.command(description="Stop dreaming")
+# async def wakeup(ctx):
+#     api = f"{BOT_API}/awaken/{ctx.author.id}"
+#     logger.info(f"🌍 Waking up '{api}'...")
+#     u = requests.get(api).json()
+#     await ctx.respond(f"🌄 I'm awake.  Dreams stopped. 👀", ephemeral=True)
 
 
 @bot.command(description="Mutate a Disco Diffusion Render")
@@ -1158,7 +1168,10 @@ async def mutateX(
 
 
 @bot.command(description="Submit a Disco Diffusion Render Request")
-async def render(
+async def render(ctx):
+    await ctx.respond(f"https://www.feverdreams.app/mutate/default-lighthouse")
+
+async def renderX(
     ctx,
     text_prompt: discord.Option(str, "Text Prompt", required=True),
     steps: discord.Option(int, "Number of steps", required=False, default=150),
