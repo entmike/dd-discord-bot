@@ -308,9 +308,14 @@ async def processCompletedJobs():
                     channel = discord.utils.get(bot.get_all_channels(), name=channel)
                     try:
                         if algo == "disco":
-                            await channel.send(f"https://www.feverdreams.app/piece/{completedJob.get('uuid')}")
+                            settings = ""
+                            await channel.send(f"<@{completedJob.get('author')}>\nhttps://www.feverdreams.app/piece/{completedJob.get('uuid')}")
                         if algo == "stable":
-                            await channel.send(f"<@{completedJob.get('author')}> `{completedJob.get('prompt')}` Seed: `{completedJob.get('seed')}`" f"https://images.feverdreams.app/images/{completedJob.get('uuid')}.png")
+                            settings = ""
+                            if not completedJob.get('private'):
+                                settings = f"\n`{completedJob.get('prompt')}`\nSeed: `{completedJob.get('seed')}` | Steps: `{completedJob.get('steps')}` | Scale: `{completedJob.get('scale')}` | ETA: `{completedJob.get('eta')}`"
+                                
+                            await channel.send(f"<@{completedJob.get('author')}>{settings}\nhttps://www.feverdreams.app/piece/{completedJob.get('uuid')}")
                     except Exception as e:
                         tb = traceback.format_exc()
                         await channel.send(f"💀 Cannot display {completedJob.get('uuid')}\n`{tb}`")

@@ -467,24 +467,46 @@ def v2_recent_images2(type, amount, page):
     if type == "paint-pour":
         q["diffusion_model"] = {"$in" : ["PaintPourDiffusion_v1.0","PaintPourDiffusion_v1.1","PaintPourDiffusion_v1.2","PaintPourDiffusion_v1.3"]}
     
-    with get_database() as client:
-        r = client.database.get_collection("queue").aggregate(
-            [
-                {"$match": q},
-                {"$addFields": {"str_timestamp": {"$toString": "$timestamp"}}},
-                {"$addFields": {"dt_timestamp": {"$dateFromString": {"dateString": "$str_timestamp"}}}},
-                {"$sort": {"dt_timestamp": -1}},
-                {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
-                {"$skip": (int(page) - 1) * int(amount)},
-                {"$limit": int(amount)},
-                {"$unwind": {
-                    "path": "$userdets",
-                    "preserveNullAndEmptyArrays" : True
-                }},
-                {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
-            ]
-        )
-        return dumps(r)
+    if type =="stable":
+        with get_database() as client:
+            r = client.database.stable_jobs.aggregate(
+                [
+                    {"$match": q},
+                    {"$addFields": {"str_timestamp": {"$toString": "$timestamp"}}},
+                    {"$addFields": {"dt_timestamp": {"$dateFromString": {"dateString": "$str_timestamp"}}}},
+                    {"$sort": {"dt_timestamp": -1}},
+                    {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+                    {"$skip": (int(page) - 1) * int(amount)},
+                    {"$limit": int(amount)},
+                    {"$unwind": {
+                        "path": "$userdets",
+                        "preserveNullAndEmptyArrays" : True
+                    }},
+                    {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
+                ]
+            )
+            return dumps(r)
+    else:
+        with get_database() as client:
+            r = client.database.get_collection("queue").aggregate(
+                [
+                    {"$match": {
+                        "status": {"$in":["archived","complete"]
+                    }}},
+                    {"$addFields": {"str_timestamp": {"$toString": "$timestamp"}}},
+                    {"$addFields": {"dt_timestamp": {"$dateFromString": {"dateString": "$str_timestamp"}}}},
+                    {"$sort": {"dt_timestamp": -1}},
+                    {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+                    {"$skip": (int(page) - 1) * int(amount)},
+                    {"$limit": int(amount)},
+                    {"$unwind": {
+                        "path": "$userdets",
+                        "preserveNullAndEmptyArrays" : True
+                    }},
+                    {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
+                ]
+            )
+            return dumps(r)
 
 
 @app.route("/recent/<amount>", methods=["GET"], defaults={"page": 1})
@@ -532,6 +554,32 @@ def random_images(amount, shape):
         )
         return dumps(r)
 
+@app.route("/v2/userfeed/<user_id>/<amount>", methods=["GET"], defaults={"page": 1})
+@app.route("/v2/userfeed/<user_id>/<amount>/<page>")
+def v2_userfeed(user_id, amount, page):
+    with get_database() as client:
+        r = client.database.get_collection("queue").aggregate(
+            [
+                {"$project": { "_id": 0 } },
+                {"$unionWith": { "coll": "stable_jobs", "pipeline": [ { "$project": { "_id": 0 } } ]} },
+                {
+                    "$addFields": {"author_id": {"$toLong": "$author"}},
+                },
+                {"$addFields": {"str_timestamp": {"$toString": "$timestamp"}}},
+                {"$addFields": {"dt_timestamp": {"$dateFromString": {"dateString": "$str_timestamp"}}}},
+                {"$match": {"status": {"$in":["archived","complete","uploaded"]}, "author_id": int(user_id), "nsfw": {"$ne": "yes"}}},
+                {"$sort": {"dt_timestamp": -1}},
+                {"$skip": (int(page) - 1) * int(amount)},
+                {"$limit": int(amount)},
+                {"$lookup": {"from": "users", "localField": "author_id", "foreignField": "user_id", "as": "userdets"}},
+                {"$unwind": {
+                    "path": "$userdets",
+                    "preserveNullAndEmptyArrays" : True
+                }},
+                {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
+            ]
+        )
+        return dumps(r)
 
 @app.route("/userfeed/<user_id>/<amount>", methods=["GET"], defaults={"page": 1})
 @app.route("/userfeed/<user_id>/<amount>/<page>")
@@ -1041,6 +1089,59 @@ def alpha_job(job_uuid):
             views += 1
             stable_jobs.update_one({"uuid": job_uuid}, {"$set": {"views": views}}, upsert=True)
             jobs[0]["views"] = views
+            return dumps(jobs[0])
+
+@app.route("/v2/meta/<job_uuid>", methods=["GET"], defaults={"mode" : "meta"})
+@app.route("/v2/job/<job_uuid>", methods=["GET"], defaults={"mode" : "view"})
+def v2_job(job_uuid, mode):
+    if request.method == "GET":
+        logger.info(f"Accessing {job_uuid}...")
+        with get_database() as client:
+            queueCollection = client.database.sanitized_jobs
+            jobs = queueCollection.aggregate(
+                [
+                    {"$project": { "_id": 0 } },
+                    {"$unionWith": { "coll": "stable_jobs", "pipeline": [ { "$project": { "_id": 0 } } ]} },
+                    {"$match": {"uuid": job_uuid}},
+                    {"$addFields": {"author_bigint": {"$toLong": "$author"}}},
+                    {"$addFields": {"str_author": {"$toString": "$author"}}},
+                    {"$lookup": {"from": "vw_users", "localField": "author_bigint", "foreignField": "user_id", "as": "userdets"}},
+                    {"$unwind": {
+                        "path": "$userdets",
+                        "preserveNullAndEmptyArrays" : True
+                    }},
+                    {"$unwind": "$uuid"},
+                    {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
+                ]
+            )
+            jobs = list(jobs)
+            if len(jobs) == 0:
+                return dumps(None)
+            
+            if mode == "view":
+                try:
+                    views = jobs[0]["views"]
+                except:
+                    views = 0
+                try:
+                    algo = jobs[0]["algo"]
+                except:
+                    algo = "disco"
+
+                # logger.info(jobs[0])
+                # views = job[0].get("views")
+                # if not views:
+                #     views = 0
+                if algo == "disco":
+                    views += 1
+                    client.database.queue.update_one({"uuid": job_uuid}, {"$set": {"views": views}}, upsert=True)
+                    jobs[0]["views"] = views
+                
+                if algo == "alpha":
+                    views += 1
+                    client.database.stable_jobs.update_one({"uuid": job_uuid}, {"$set": {"views": views}}, upsert=True)
+                    jobs[0]["views"] = views
+
             return dumps(jobs[0])
 
 @app.route("/job/<job_uuid>", methods=["GET", "DELETE"])
@@ -1610,6 +1711,7 @@ def web_myjobs(status, page):
         return dumps(jobs)
 
 
+@app.route("/web/stable/update", methods=["POST"], defaults={"mode" : "update"})
 @app.route("/web/stable/edit", methods=["POST"], defaults={"mode" : "edit"})
 @app.route("/web/stable/mutate", methods=["POST"], defaults={"mode" : "mutate"})
 @requires_auth
@@ -1624,31 +1726,73 @@ def web_stable(mode):
     logger.info(f"Incoming Stable Diffusion job request from {discord_id}...")
     job = request.json.get("job")
     
-    seed = int(job["seed"])
-    if seed == -1:
-        seed = random.randint(0, 2**32)
+    # EDIT
+    if mode == "edit":
+        with get_database() as client:
+            j = client.database.queue.find_one({"uuid" : job["uuid"], "status" : {"$in":["queued","rejected"]}})
+            if not j:
+                logger.info(f"{j['uuid']} is not valid.")
+                return dumps({
+                    "success" : False,
+                    "message" : f"You cannot edit {j['uuid']}."
+                })
+            else:
+                if j["author"] != discord_id:
+                    logger.info(f"{j['uuid']} is not valid.")
+                    return dumps({
+                        "success" : False,
+                        "message" : "You cannot edit someone else's job."
+                    })
 
-    newrecord = {
-        "uuid": u,
-        "algo" : algo,
-        "nsfw": job["nsfw"],
-        "author": discord_id,
-        "status": "queued",
-        "timestamp": timestamp,
-        "origin": "web",
-        "n_samples" : 1,
-        "prompt": job["prompt"],
-        "seed": seed,
-        "steps": job["steps"],
-        "gpu_preference": job["gpu_preference"],
-        "width_height": job["width_height"],
-        "scale": job["scale"],
-        "eta": job["eta"]
-    }
-    with get_database() as client:
-        queueCollection = client.database.get_collection("stable_jobs")
-        queueCollection.insert_one(newrecord)
-    return dumps({"success" : True, "new_record" : newrecord})
+    # UPDATE
+    if mode == "update":
+        with get_database() as client:
+            j = client.database.stable_jobs.find_one({"uuid" : job["uuid"], "author" : discord_id})
+            if not j:
+                return dumps({
+                    "success" : False,
+                    "message" : f"You cannot update {j['uuid']}."
+                })
+            else:
+                logger.info(f"Updating job {u} by {str(discord_id)}...")
+                with get_database() as client:
+                    updateParams = {
+                        "private" : job["private"]
+                    }
+                    client.database.stable_jobs.update_one({"uuid": job["uuid"], "author" : discord_id}, {"$set": updateParams})
+                return dumps({
+                    "success" : True,
+                    "message" : f"{job['uuid']} successfully updated."
+                })
+
+    #CREATE  
+    if mode == "mutate":
+        seed = int(job["seed"])
+        if seed == -1:
+            seed = random.randint(0, 2**32)
+
+        newrecord = {
+            "uuid": u,
+            "algo" : algo,
+            "nsfw": job["nsfw"],
+            "private": job["private"],
+            "author": discord_id,
+            "status": "queued",
+            "timestamp": timestamp,
+            "origin": "web",
+            "n_samples" : 1,
+            "prompt": job["prompt"],
+            "seed": seed,
+            "steps": job["steps"],
+            "gpu_preference": job["gpu_preference"],
+            "width_height": job["width_height"],
+            "scale": job["scale"],
+            "eta": job["eta"]
+        }
+        with get_database() as client:
+            queueCollection = client.database.get_collection("stable_jobs")
+            queueCollection.insert_one(newrecord)
+        return dumps({"success" : True, "new_record" : newrecord})
 
 @app.route("/web/edit", methods=["POST"], defaults={"mode" : "edit"})
 @app.route("/web/mutate", methods=["POST"], defaults={"mode" : "mutate"})
@@ -1768,7 +1912,7 @@ def web_mutate(mode):
         return dumps({"success" : True, "new_record" : newrecord})
     
     if mode=="edit":
-        logger.info(f"Updating job {u} by {str(discord_id)}...")
+        logger.info(f"Editing job {u} by {str(discord_id)}...")
         with get_database() as client:
             client.database.queue.update_one({"uuid": u, "author" : discord_id}, {"$set": newrecord})
         return dumps({"success" : True, "new_record" : newrecord})
