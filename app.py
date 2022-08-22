@@ -994,8 +994,8 @@ def abandonjob(agent_id):
         logger.info(f"Abandoned ({result.matched_count})")
         return({"success": True})
 
-@app.route("/alpha/updatejob", methods=["POST"])
-def alpha_updatejob():
+@app.route("/stable/updatejob", methods=["POST"])
+def stable_updatejob():
     if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
         return jsonify({"message": "ERROR: Unauthorized"}), 401
     uuid = request.form.get("uuid")
@@ -1059,8 +1059,8 @@ def myhistory(author_id, status):
         jobs = queueCollection.find(q)
         return jsonify(json.loads(dumps(jobs)))
 
-@app.route("/alpha/job/<job_uuid>", methods=["GET"])
-def alpha_job(job_uuid):
+@app.route("/stable/job/<job_uuid>", methods=["GET"])
+def stable_job(job_uuid):
     if request.method == "GET":
         logger.info(f"Accessing Stable Diffusion Job {job_uuid}...")
         with get_database() as client:
@@ -1137,7 +1137,7 @@ def v2_job(job_uuid, mode):
                     client.database.queue.update_one({"uuid": job_uuid}, {"$set": {"views": views}}, upsert=True)
                     jobs[0]["views"] = views
                 
-                if algo == "alpha":
+                if algo == "stable" or algo == "alpha":
                     views += 1
                     client.database.stable_jobs.update_one({"uuid": job_uuid}, {"$set": {"views": views}}, upsert=True)
                     jobs[0]["views"] = views
@@ -1416,8 +1416,8 @@ def reject(agent_id, job_uuid):
         else:
             return f"job rejected, {agent_id}."
 
-@app.route("/alpha/reject/<agent_id>/<job_uuid>", methods=["POST"])
-def alpha_reject(agent_id, job_uuid):
+@app.route("/stable/reject/<agent_id>/<job_uuid>", methods=["POST"])
+def stable_reject(agent_id, job_uuid):
     pulse(agent_id=agent_id)
     logger.error(f"❌ Rejecting {job_uuid} - Details in traceback in DB.")
     tb = request.form.get("traceback")
@@ -1720,8 +1720,8 @@ def web_stable(mode):
 
     current_user = _request_ctx_stack.top.current_user
     discord_id = int(current_user["sub"].split("|")[2])
-    algo = 'alpha'
-    u = str(f"{algo}-{uuid.uuid4()}")
+    algo = 'stable'
+
     timestamp = datetime.utcnow()
     logger.info(f"Incoming Stable Diffusion job request from {discord_id}...")
     job = request.json.get("job")
@@ -1754,7 +1754,7 @@ def web_stable(mode):
                     "message" : f"You cannot update {j['uuid']}."
                 })
             else:
-                logger.info(f"Updating job {u} by {str(discord_id)}...")
+                logger.info(f"Updating job {job['uuid']} by {str(discord_id)}...")
                 with get_database() as client:
                     updateParams = {
                         "private" : job["private"]
@@ -1768,30 +1768,42 @@ def web_stable(mode):
     #CREATE  
     if mode == "mutate":
         seed = int(job["seed"])
+        try:
+            batch_size = int(job["batch_size"])
+        except:
+            batch_size = 1
         if seed == -1:
             seed = random.randint(0, 2**32)
 
-        newrecord = {
-            "uuid": u,
-            "algo" : algo,
-            "nsfw": job["nsfw"],
-            "private": job["private"],
-            "author": discord_id,
-            "status": "queued",
-            "timestamp": timestamp,
-            "origin": "web",
-            "n_samples" : 1,
-            "prompt": job["prompt"],
-            "seed": seed,
-            "steps": job["steps"],
-            "gpu_preference": job["gpu_preference"],
-            "width_height": job["width_height"],
-            "scale": job["scale"],
-            "eta": job["eta"]
-        }
-        with get_database() as client:
-            queueCollection = client.database.get_collection("stable_jobs")
-            queueCollection.insert_one(newrecord)
+        for i in range(batch_size):
+            new_seed = seed+i
+            logger.info(f"{i} of {batch_size} - Seed: {seed+i}")
+            u = str(f"{algo}-{uuid.uuid4()}")
+            newrecord = {
+                "uuid": u,
+                "algo" : algo,
+                "nsfw": job["nsfw"],
+                "private": job["private"],
+                "author": discord_id,
+                "status": "queued",
+                "timestamp": timestamp,
+                "origin": "web",
+                "n_samples" : 1,
+                "prompt": job["prompt"],
+                "seed": new_seed,
+                "steps": job["steps"],
+                "gpu_preference": job["gpu_preference"],
+                "width_height": job["width_height"],
+                "scale": job["scale"],
+                "eta": job["eta"]
+            }
+
+            with get_database() as client:
+                queueCollection = client.database.get_collection("stable_jobs")
+                queueCollection.insert_one(newrecord)
+            
+            if i == 0:  # Return just first entry of batch
+                return_record = newrecord
         return dumps({"success" : True, "new_record" : newrecord})
 
 @app.route("/web/edit", methods=["POST"], defaults={"mode" : "edit"})
@@ -2245,8 +2257,8 @@ def process_upload(job_uuid, filepath, filename):
         except Exception as e:
             logger.error(e)
 
-@app.route("/alpha/deliverorder", methods=["POST"])
-def alpha_deliver():
+@app.route("/stable/deliverorder", methods=["POST"])
+def stable_deliver():
     logger.info("🐴")
     agent_id = request.form.get("agent_id")
     agent_version = request.form.get("agent_version")
@@ -2396,8 +2408,8 @@ def v2_deliver():
             "traceback" : tb
         })
 
-@app.route("/alpha/takeorder/<agent_id>", methods=["POST"])
-def alpha_takeorder(agent_id):
+@app.route("/stable/takeorder/<agent_id>", methods=["POST"])
+def stable_takeorder(agent_id):
     # Make sure agent is registered...
     with get_database() as client:
         agent = client.database.agents.find_one({"agent_id": agent_id})

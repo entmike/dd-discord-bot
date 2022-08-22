@@ -69,7 +69,7 @@ def updateJob(data, algo = "disco"):
         api = f"{BOT_API}/updatejob"
     
     if algo == "stable":
-        api = f"{BOT_API}/alpha/updatejob"
+        api = f"{BOT_API}/stable/updatejob"
 
     logger.info(f"🌍 Updating Job '{data}' ({algo})...")
     try:
@@ -300,7 +300,7 @@ async def processCompletedJobs():
                     if nsfw == "yes":
                         channel = "nightmare-fuel"
                 if algo == "stable":
-                    channel = "test-pilot-chamber"
+                    channel = "stable-images"
 
                 channels = [channel]
 
