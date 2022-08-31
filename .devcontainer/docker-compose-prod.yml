@@ -1,8 +1,8 @@
 version: '3'
 
 services:
-  app:
-    hostname: app
+  api:
+    hostname: api
     build:
       context: .
       dockerfile: Dockerfile
@@ -10,7 +10,7 @@ services:
     - 5000:8080
     volumes:
       - ..:/workspace:cached
-    command: /bin/bash -c "source /workspace/.venv/dd-discord-bot/bin/activate && cd /workspace && pip install -r requirements.txt && gunicorn -b 0.0.0.0:8080 --workers=10 --threads 4 --backlog 2048 --worker-connections 1000 app:app"
+    command: /bin/bash -c "source /workspace/.venv/dd-discord-bot/bin/activate && cd /workspace && pip install -r requirements.txt && gunicorn -b 0.0.0.0:8080 --workers=5 --threads 2 --backlog 2048 --worker-connections 1000 api:app"
   bot:
     hostname: bot
     build:
@@ -30,7 +30,8 @@ services:
     ports:
     - 7171:27017
     volumes:
-      - /home/ec2-user/appdata/dd-bot-db/db:/data/db
+      - /home/ec2-user/appdata/dd-bot-db3/db:/data/db
+      - /home/ec2-user/appdata/dd-bot-db/dump-july-2022:/dump-july-2002
     #   - /home/ec2-user/appdata/dd-bot-db/mongod.conf:/etc/mongod.conf
     # command: ["--auth"]
     # As in the "app" service, use "forwardPorts" in **devcontainer.json** to forward an app port locally.

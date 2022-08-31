@@ -61,20 +61,16 @@ agents = []
 ticks = 0
 
 
-def updateJob(data, algo = "disco"):
+def updateJob(data):
     """
     Updates a Job by `uuid` via API call.
     """
-    if algo == "disco":
-        api = f"{BOT_API}/updatejob"
-    
-    if algo == "stable":
-        api = f"{BOT_API}/stable/updatejob"
+    api = f"{BOT_API}/v3/bot/updatejob"
 
-    logger.info(f"🌍 Updating Job '{data}' ({algo})...")
+    logger.info(f"🌍 Updating Job '{data}'...")
     try:
         r = requests.post(api, data=data, headers={"x-dd-bot-token": BOT_TOKEN}, timeout=10).json()
-        logger.info("Job updated.")
+        logger.info(f"Job updated.")
     except:
         logger.info("Update Job timed out.")
         r = None
@@ -209,12 +205,12 @@ async def queue_status():
             await message.edit(embed=embed)
         except:
             msg = await channel.send(embed=embed)
-            requests.post(
-                f"{BOT_API}/serverinfo", headers={"x-dd-bot-token": BOT_TOKEN}, data={"subject": "queue_status", "channel": int(channel.id), "message": int(msg.id)}
-            ).json()
+            # requests.post(
+            #     f"{BOT_API}/serverinfo", headers={"x-dd-bot-token": BOT_TOKEN}, data={"subject": "queue_status", "channel": int(channel.id), "message": int(msg.id)}
+            # ).json()
     else:
         msg = await channel.send(embed=embed)
-        requests.post(f"{BOT_API}/serverinfo", headers={"x-dd-bot-token": BOT_TOKEN}, data={"subject": "queue_status", "channel": int(channel.id), "message": int(msg.id)}).json()
+        # requests.post(f"{BOT_API}/serverinfo", headers={"x-dd-bot-token": BOT_TOKEN}, data={"subject": "queue_status", "channel": int(channel.id), "message": int(msg.id)}).json()
     e = datetime.datetime.now()
 
     t = e - n
@@ -249,21 +245,22 @@ async def processLogs():
 
 async def processCompletedJobs():
     for kind in [{
-        "url":f"{BOT_API}/queue/complete/",
-        "algo": "disco"
-    },{
-        "url":f"{BOT_API}/stable_jobs/complete/",
-        "algo": "stable"
+        "url":f"{BOT_API}/queue/complete/"
     }]:
         api = kind["url"]
-        algo = kind["algo"]
-        logger.info(f"🌍 Getting completed {algo} jobs from '{api}'...")
-        completedJobs = requests.get(api).json()
+        logger.info(f"🌍 Getting completed jobs from '{api}'...")
+        try:
+            completedJobs = requests.get(api).json()
+        except:
+            tb = traceback.format_exc()
+            logger.error(tb)
+
         if len(completedJobs) == 0:
             logger.info("No completed jobs.")
         else:
             logger.info(f"{len(completedJobs)} completed jobs found...")
             for completedJob in completedJobs:
+                algo = completedJob.get("job")
                 if algo == "disco":
                     logger.info(f"Found completed job: {completedJob.get('uuid')} | Render Type: {completedJob.get('render_type')}")
                     render_type = completedJob.get("render_type")
@@ -271,7 +268,7 @@ async def processCompletedJobs():
                 nsfw = completedJob.get("nsfw")
                 
                 if algo == "disco":
-                    channel = "images"
+                    channel = "disco-images"
                     
                     if completedJob.get("diffusion_model") in ["portrait_generator_v001_ema_0.9999_1MM","portrait_generator_v1.5_ema_0.9999_165000","portrait_generator_v003","portrait_generator_v004"]:
                         channel = "portraits"
@@ -297,10 +294,11 @@ async def processCompletedJobs():
                     if render_type == "nightmare":
                         channel = "nightmare-fuel"
                     
-                    if nsfw == "yes":
-                        channel = "nightmare-fuel"
                 if algo == "stable":
                     channel = "stable-images"
+                
+                if nsfw == True:
+                    channel = "nightmare-fuel"
 
                 channels = [channel]
 
@@ -321,21 +319,16 @@ async def processCompletedJobs():
                         await channel.send(f"💀 Cannot display {completedJob.get('uuid')}\n`{tb}`")
                 
                 
-                updateJob({"uuid": completedJob.get("uuid"), "status": "archived"}, algo = algo)
+                updateJob({"uuid": completedJob.get("uuid"), "status": "archived"})
                 
 
 
 async def processFailedJobs():
     for kind in [{
-        "url":f"{BOT_API}/queue/failed/",
-        "algo": "disco"
-    },{
-        "url":f"{BOT_API}/stable_jobs/failed/",
-        "algo": "stable"
+        "url":f"{BOT_API}/queue/failed/"
     }]:
         api = kind["url"]
-        algo = kind["algo"]
-        logger.info(f"🌍 Getting failed jobs from '{api}' ({algo})...")
+        logger.info(f"🌍 Getting failed jobs from '{api}'...")
         failedJobs = requests.get(api).json()
         botspam_channels = ["botspam"]
         if len(failedJobs) == 0:
@@ -367,7 +360,7 @@ async def processFailedJobs():
                     rejectedCount += 1
                 else:
                     rejectedCount = 0
-                updateJob({"uuid": failedJob.get("uuid"), "status": "rejected", "rejectedCount": rejectedCount}, algo=algo)
+                updateJob({"uuid": failedJob.get("uuid"), "status": "rejected", "rejectedCount": rejectedCount})
 
 
 async def processStalledJobs():
@@ -451,7 +444,7 @@ async def processEvents():
                             if render_type == "sketch":
                                 channel = "sketches"
                             if render_type == "render":
-                                channel = "images"
+                                channel = "disco-images"
                             if render_type == "mutate":
                                 channel = "mutations"
                             if render_type == "dream":
@@ -506,28 +499,8 @@ async def task_loop():
     logger.info("🚩 Start of Loop 🚩")
 
     # Queue Stats
-    logger.info("📜 Updating Queue Stats")
-    await queue_status()
-
-    # Agents
-    # logger.info("📜 Updating Agent Status")
-    # await agent_status()
-
-    # Active
-    # logger.info("📜 Updating Active Queue")
-    # await queueBroadcast("all", "processing", None, DISCORD_ACTIVE_JOBS, "active")
-
-    # Waiting
-    # logger.info("📜 Updating Waiting Queue")
-    # await queueBroadcast("all", "queued", None, DISCORD_WAITING_JOBS, "waiting")
-
-    # Process any Events
-    # logger.info("🏁 Checking Events...")
-    # await processEvents()
-
-    # Display any new messages
-    # logger.info("🪵 Processing Logs...")
-    # await processLogs()
+    # logger.info("📜 Updating Queue Stats")
+    # await queue_status()
 
     # Display any completed jobs
     logger.info("🏁 Processing Completed Jobs...")
@@ -572,7 +545,7 @@ async def refresh_all(ctx):
 async def do_refresh(job_uuid):
     embed, file, view = retrieve(job_uuid)
     logger.info(job_uuid)
-    channels = ["images", "sketches", "images-discussion"]
+    channels = ["disco-images", "sketches", "images-discussion"]
     job = requests.get(f"{BOT_API}/job/{job_uuid}").json()
     if job:
         logger.info(f"{job_uuid} being refreshed in Discord...")
@@ -872,7 +845,7 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member):
-    await member.send(f"Welcome to the server, {member.mention}! Enjoy your stay here.  Visit https://www.feverdreams.app/mutate/default-lighthouse to get started creating!")
+    await member.send(f"Welcome to the server, {member.mention}! Enjoy your stay here.  Visit https://www.feverdreams.app to get started creating!")
 
 
 async def do_render(
@@ -955,7 +928,7 @@ async def do_render(
         if render_type == "sketch":
             channel = "sketches"
         if render_type == "render":
-            channel = "images"
+            channel = "disco-images"
         if render_type == "mutate":
             channel = "mutations"
         if render_type == "dream":
@@ -1174,7 +1147,7 @@ async def mutateX(
 
 @bot.command(description="Submit a Disco Diffusion Render Request")
 async def render(ctx):
-    await ctx.respond(f"https://www.feverdreams.app/mutate/default-lighthouse")
+    await ctx.respond(f"https://www.feverdreams.app")
 
 async def renderX(
     ctx,
@@ -1451,7 +1424,7 @@ async def channel_erase(job):
     if render_type == "sketch":
         channel = "sketches"
     if render_type == "render":
-        channel = "images"
+        channel = "disco-images"
     if render_type == "mutate":
         channel = "mutations"
     if render_type == "dream":
@@ -1464,31 +1437,6 @@ async def channel_erase(job):
     msg = await channel.fetch_message(job.get("progress_msg"))
     logger.info(f"{msg.id} deleted.")
     await msg.delete()
-
-
-@bot.command(description="Retry a render request")
-async def retry(ctx, uuid):
-    job = requests.get(f"{BOT_API}/job/{uuid}").json()
-    if job:
-        if job.get("author") == ctx.author.id and job.get("status") == "rejected":
-            u = requests.post(api, data={"status": "queued"}).json()
-            if u["matched_count"] == 0:
-                await ctx.respond(f"❌ Cannot retry {uuid}", ephemeral=True)
-            else:
-                await ctx.respond(f"💼 Job marked for retry.", ephemeral=True)
-        else:
-            await ctx.respond(f"❌ Cannot retry {uuid}", ephemeral=True)
-    else:
-        await ctx.respond(f"❌ Cannot find job `{uuid}`.  Check yourself.", ephemeral=True)
-
-
-@bot.command(description="Retry a render request (intended for anims)")
-async def sudo_retry(ctx, uuid):
-    u = updateJob({"uuid": uuid, "status": "queued"})
-    if u["matched_count"] == 0:
-        await ctx.respond(f"❌ Cannot retry {uuid}", ephemeral=True)
-    else:
-        await ctx.respond(f"💼 Job marked for retry.", ephemeral=True)
 
 
 @bot.command(description="Get details of a render request")
