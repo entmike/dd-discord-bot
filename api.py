@@ -1,3 +1,4 @@
+import traceback
 import random
 from docarray import Document
 from docarray import DocumentArray
@@ -507,7 +508,16 @@ def v3_random(type, amount):
                     "preserveNullAndEmptyArrays": True
                 }
             })
-        r = client.database.pieces.aggregate(operations)
+        r = list(client.database.pieces.aggregate(operations))
+        # Strip private params out
+        for piece in r:
+            try:
+                if piece["private"] and piece["author"] != user_id:
+                    del piece["params"]
+            except:
+                pass
+
+
         return dumps(r)
 
 @app.route("/v2/userfeed/<user_id>/<amount>", methods=["GET"], defaults={"page": 1})
@@ -1476,32 +1486,49 @@ def v3_myfavs(amount, page):
     else:
         user_id = None
     
-    with get_database() as client:
-        r = list(client.database.pins.aggregate([
-            {"$match" : {"user_id" : user_id}},
-            {"$sort": {"pinned_on": -1}},
-            {"$skip": (int(page) - 1) * int(amount)},
-            {"$limit": int(amount)},
-            {"$lookup": {"from": "pieces", "localField": "uuid", "foreignField": "uuid", "as": "pieces"}},
-            {"$unwind": {
-                "path": "$pieces",
-                "preserveNullAndEmptyArrays" : False
-            }},
-            {"$replaceRoot" : {
-               "newRoot": "$pieces"
-            }},
-            {"$addFields": {
-                "pinned": True
-            }},
-            {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
-            {"$unwind": {
-                "path": "$userdets",
-                "preserveNullAndEmptyArrays" : True
-            }},
-            {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
-            ]))
-        
-        return dumps(r)
+    try:
+        with get_database() as client:
+            r = list(client.database.pins.aggregate([
+                {"$match" : {"user_id" : user_id}},
+                {"$sort": {"pinned_on": -1}},
+                {"$skip": (int(page) - 1) * int(amount)},
+                {"$limit": int(amount)},
+                {"$lookup": {"from": "pieces", "localField": "uuid", "foreignField": "uuid", "as": "pieces"}},
+                {"$unwind": {
+                    "path": "$pieces",
+                    "preserveNullAndEmptyArrays" : False
+                }},
+                {"$replaceRoot" : {
+                "newRoot": "$pieces"
+                }},
+                {"$addFields": {
+                    "pinned": True
+                }},
+                {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+                {"$unwind": {
+                    "path": "$userdets",
+                    "preserveNullAndEmptyArrays" : True
+                }},
+                {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
+                ]))
+            
+            # Strip private params out
+            for piece in r:
+                try:
+                    if piece["private"] and piece["author"] != user_id:
+                        del piece["params"]
+                except:
+                    pass
+
+            return dumps(r)
+    except:
+        tb = traceback.format_exc()
+        logger.error(tb)
+        return dumps({
+            "success" : False,
+            "message" : "Delivery failed!",
+            "traceback" : tb
+        })
 
 @app.route("/v3/recent/<type>/<amount>", methods=["GET"], defaults={"page": 1})
 @app.route("/v3/recent/<type>/<amount>/<page>")
@@ -1601,11 +1628,13 @@ def v3_recent(type, amount, page):
         
         # Strip private params out
         for piece in r:
-            if piece["private"]:
-                del piece["params"]
+            try:
+                if piece["private"] and piece["author"] != user_id:
+                    del piece["params"]
+            except:
+                pass
+        
         return dumps(r)
-
-
 @app.route("/v3/cancel", methods=["POST"])
 @requires_auth
 def v3_cancel():
@@ -1818,11 +1847,12 @@ def v3_userfeed(gallery_id, amount, page):
         r = list(client.database.pieces.aggregate(operations))
 
         # Strip private params out
-        if not user_id or user_id != gallery_id:
-            for piece in r:
-                if piece["private"]:
+        for piece in r:
+            try:
+                if piece["private"] and piece["author"] != user_id:
                     del piece["params"]
-                
+            except:
+                pass
         
         return dumps(r)
 
@@ -1898,10 +1928,12 @@ def v3_related(uuid, amount, page):
 
         # Strip private params out
         for piece in r:
-            if piece["private"] and piece["author"] !=user_id:
-                del piece["params"]
-                
-        
+            try:
+                if piece["private"] and piece["author"] != user_id:
+                    del piece["params"]
+            except:
+                pass
+
         return dumps(r)
 
 
@@ -1975,8 +2007,11 @@ def v3_job(job_uuid, mode):
             
             logger.info(job)
             # Strip private params out
-            if job["private"] and job["author"] != user_id:
-                del job["params"]
+            try:
+                if job["private"] and job["author"] != user_id:
+                    del job["params"]
+            except:
+                pass
 
             return dumps(job)
 
@@ -2053,8 +2088,11 @@ def v3_public_queue(status):
     # Strip private params out
     for item in queue:
         if "private" in item:
-            if item["private"]:
-                del item["params"]
+            try:
+                if item["private"]:
+                    del item["params"]
+            except:
+                pass
         
 
     return dumps(queue)
