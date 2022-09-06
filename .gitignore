@@ -1,3 +1,6 @@
+# Thumbnails
+thumb*.jpg
+
 # VS Code
 .vscode
 

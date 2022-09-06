@@ -45,7 +45,7 @@ def requires_auth(f):
                 raise AuthError({"code": "invalid_header", "description": "Unable to parse authentication token."}, 401)
 
             _request_ctx_stack.top.current_user = payload
-            user_info = user_pulse(payload)
+            user_info = user_pulse(payload, True)
             _request_ctx_stack.top.user_info = user_info
             logger.info(f"👤 {user_info}")
 
@@ -137,7 +137,7 @@ def get_auth0_mgmt_token():
 
     return loads(data.decode("utf-8"))
 
-def user_pulse(current_user):
+def user_pulse(current_user, update_db):
     # logger.info(f"💓 User activity from {current_user}")
     access_token = get_auth0_mgmt_token()["access_token"]
     try:
@@ -157,17 +157,18 @@ def user_pulse(current_user):
 
     discord_id = int(current_user["sub"].split("|")[2])
 
-    # logger.info(f"📅 Updating user")
-    with get_database() as client:
-        client.database.users.update_one({
-            "user_id": discord_id
-        }, {
-            "$set": {
-                "last_seen": datetime.utcnow(),
-                "nickname": user_info["nickname"],
-                "picture": user_info["picture"]
-            }
-        },
-        upsert=True)
+    if update_db:
+        # logger.info(f"📅 Updating user")
+        with get_database() as client:
+            client.database.users.update_one({
+                "user_id": discord_id
+            }, {
+                "$set": {
+                    "last_seen": datetime.utcnow(),
+                    "nickname": user_info["nickname"],
+                    "picture": user_info["picture"]
+                }
+            },
+            upsert=True)
 
     return user_info
