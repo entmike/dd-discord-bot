@@ -228,6 +228,13 @@ def pin(uuid):
         
         return dumps({"success" : True, "message": "Pinned"})
 
+@app.route("/nope/<uuid>", methods=["GET"])
+def nope(uuid):
+    if request.method == "GET":
+        with get_database() as client:
+            client.database.pieces.update_many({"uuid" : uuid},{"$set":{"hide" : True}})
+            return dumps({"success" : True, "message": f"👀 Hid {uuid}"})
+
 @app.route("/hide/<uuid>", methods=["POST","DELETE"])
 @requires_auth
 def hide(uuid):
@@ -525,7 +532,7 @@ def v3_random(type, amount):
 def v2_userfeed(user_id, amount, page):
     args = request.args   
     q = {
-        "status": {"$in":["archived","complete","uploaded"]},
+        "status": {"$in":["archived","complete"]},
         "author_id": int(user_id),
         "nsfw": {"$nin": [True]},
         "hide": {"$nin": [True]},
@@ -2351,7 +2358,6 @@ def web_mutate(mode):
     import random
     logger.info(mode)
     current_user = _request_ctx_stack.top.current_user
-    # user_pulse(current_user)
     discord_id = int(current_user["sub"].split("|")[2])
     logger.info(f"Incoming {mode} job request from {discord_id}...")
     job = request.json.get("job")
@@ -2471,7 +2477,6 @@ def placeorder():
     if request.headers.get("x-dd-bot-token") != BOT_TOKEN:
         return jsonify({"message": "ERROR: Unauthorized"}), 401
     author = request.form.get("author", type=int)
-    # user_pulse(author)
     newrecord = {
         "uuid": request.form.get("uuid", type=str),
         "parent_uuid": request.form.get("parent_uuid", type=str),
@@ -4271,7 +4276,6 @@ def awaken(author_id):
 @requires_auth
 def webdream():
     current_user = _request_ctx_stack.top.current_user
-    # user_pulse(current_user)
     discord_id = current_user["sub"].split("|")[2]
 
     if request.method == "GET":
