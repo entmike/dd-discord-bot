@@ -98,7 +98,7 @@ def s3_jpg(job_uuid, algo="disco"):
                 url = f"{BOT_S3_WEB}{job_uuid}.png"
                 img = Image.open(urlopen(url))
 
-        jpgfile = f"{job_uuid}.jpg"
+        jpgfile = f"jpg/{job_uuid}.jpg"
         img.save(jpgfile, "JPEG")
         upload_file_s3(jpgfile, BOT_S3_BUCKET, f"jpg/{job_uuid}.jpg", {"ContentType": "image/jpeg"})
         os.remove(jpgfile)
@@ -141,8 +141,10 @@ def s3_thumbnail(job_uuid, size, algo="disco"):
 
         img.thumbnail((int(size), int(size)), Image.LANCZOS)
         thumbfile = f"thumb_{size}_{job_uuid}.jpg"
-        img.save(thumbfile, "JPEG")
-        upload_file_s3(thumbfile, BOT_S3_BUCKET, f"thumbs/{size}/{job_uuid}.jpg", {"ContentType": "image/jpeg"})
+        fn = os.path.join(app.config["UPLOAD_FOLDER"], thumbfile)
+        logger.info(f"👍: {fn}")
+        img.save(fn, "JPEG")
+        upload_file_s3(fn, BOT_S3_BUCKET, f"thumbs/{size}/{job_uuid}.jpg", {"ContentType": "image/jpeg"})
         os.remove(thumbfile)
     except Exception as e:
         import traceback
@@ -620,6 +622,15 @@ def web_queue(status):
         )
         return dumps(queue)
 
+@app.route("/discord/queue/")
+def discord_queue():
+    with get_database() as client:
+        q = {}
+        queue = client.database.discord_queue.aggregate([
+            {"$match": q},
+            {"$limit": 10}
+        ])
+        return dumps(queue)
 
 @app.route("/queue/", methods=["GET"], defaults={"status": "all"})
 @app.route("/queue/<status>/")
@@ -1270,10 +1281,11 @@ def web_agentjobs(agent, page):
     with get_database() as client:
         q = {"agent_id" : agent}
         amount = 25
-        jobs = client.database.vw_queue.aggregate(
+        jobs = client.database.queue.aggregate(
             [
+                {"$unionWith": { "coll": "pieces", "pipeline": [ { "$project": { "_id": 0 } } ]} },
                 {"$match": q},
-                {"$sort": {"dt_timestamp": -1}},
+                {"$sort": {"timestamp": -1}},
                 {"$skip": (int(page) - 1) * int(amount)},
                 {"$limit": int(amount)}
             ])
@@ -1459,12 +1471,25 @@ def v3_updatejob():
     uuid = request.form.get("uuid")
     vals = request.form
     newvals = {}
-    for val in vals:
-        newvals[val] = vals[val]
-
+    discord = False
     with get_database() as client:
-        result = client.database.pieces.update_one({"uuid": uuid}, {"$set": newvals})
+        # Default to pieces
+        collection = client.database.pieces
+        for val in vals:
+            # Override if it was queue
+            if val == "collection":
+                collection = client.database.get_collection(vals[val])
+            else:
+                newvals[val] = vals[val]
+            if val == "discord_message_id":
+                discord = True
+
+        
+        result = collection.update_one({"uuid": uuid}, {"$set": newvals})
         logger.info(f"Updated {uuid} ({result.matched_count})")
+        if discord:
+            client.database.discord_queue.delete_many({"uuid": uuid})
+            logger.info(f"Removing {uuid} from discord bot queue.")
         return dumps({"matched_count": result.matched_count})
 
 @app.route("/v3/queuestats")
@@ -1562,6 +1587,10 @@ def v3_recent(type, amount, page):
     if type == "dream":
         q["algo"] = "stable"
         q["origin"] = "dream"
+
+    if type == "hallucination":
+        q["algo"] = "stable"
+        q["origin"] = "hallucination"
 
     if type == "general":
         q["algo"] = "disco"
@@ -2593,6 +2622,7 @@ def v3_postProcess(job_uuid, algo):
     import io, base64
     with get_database() as client:
         pieces = client.database.pieces
+        discord = client.database.discord_queue
 
         job = pieces.find_one({"uuid": job_uuid})
         
@@ -2667,6 +2697,7 @@ def v3_postProcess(job_uuid, algo):
                 payload["discoart_tags"] = da_tags
             
             pieces.update_one({"uuid": job_uuid}, {"$set": payload})
+            discord.insert_one(job)
 
 def postProcess(job_uuid, algo):
     import io, base64
@@ -3420,7 +3451,7 @@ def v3_takeorder(agent_id):
                     })
                 else:
                     # See if we need to dream
-                    if int(agent_info["idle_time"]) > 30:
+                    if int(agent_info["idle_time"]) > 5:
                         mode = "dreaming"
                     else:
                         mode = "awake"
@@ -3888,28 +3919,57 @@ def takeorder(agent_id):
 def v3_dream(agent_info):
     import random
     import dd_prompt_salad
+    type_seed = random.randint(0, 6)
+    weights_hash = "fe4efff1e174c627256e44ec2991ba279b3816e364b49f9be2abc0b3ff3f8556" # 1.4
+    width_height = [512,512]
+    if agent_info['gpu_size'] == "small":
+        width_height = random.sample([[704,512], [512,704], [512,512]], 1)[0]
+    if agent_info['gpu_size'] == "medium":
+        width_height = random.sample([[704,512], [512,704], [512,512]], 1)[0]
+    if agent_info['gpu_size'] == "large":
+        width_height = random.sample([[1024,512], [512,1024], [1536,512], [512,1536]], 1)[0]
     
     # Ensure it's a unique job
     exists = True
     while exists:
-        width_height = [512,512]
-        if agent_info['gpu_size'] == "small":
-            width_height = random.sample([[704,512], [512,704], [512,512]], 1)[0]
-        if agent_info['gpu_size'] == "medium":
-            width_height = random.sample([[704,512], [512,704], [512,512]], 1)[0]
-        if agent_info['gpu_size'] == "large":
-            width_height = random.sample([[1024,512], [512,1024], [1536,512], [512,1536]], 1)[0]
-
-        weights_hash = "fe4efff1e174c627256e44ec2991ba279b3816e364b49f9be2abc0b3ff3f8556" # 1.4
         seed = random.randint(0, 2**32)
         eta = 0.0
         scale = random.sample([6,7,8,9,10,11,12,13,14], 1)[0]
         steps = 50
-        # template = "A beautiful landscape, art by {progrock/artist}"
-        dream = getOldestDream()
-        template = dream.get("prompt")
-        author_id = dream.get("author_id")
-        prompt = dd_prompt_salad.make_random_prompt(amount=1, prompt_salad_path="prompt_salad", template=template)[0]
+        if type_seed == 1:
+            # Hallucinate
+            author_id = 977198605221912616
+            origin = "hallucination"
+            q = {
+                "nsfw": {"$nin": [True]},
+                "hide": {"$nin": [True]},
+                "origin": "web",
+                "private" : False,
+                "algo" : "stable"
+            }
+            amount = 5
+            with get_database() as client:
+                operations = [
+                    {"$match": q},
+                    {"$sample": {"size": int(amount)}},
+                ]
+                r = client.database.pieces.aggregate(operations)
+                h = []
+                for piece in r:
+                    params = piece.get("params")
+                    pr = params["prompt"]
+                    p = pr.split(",")
+                    w = p[random.randint(0, len(p)-1)]
+                    h.append(w)
+                prompt = ",".join(h)
+        else:
+            # Dream
+            dream = getOldestDream()
+            origin = "dream"
+            template = dream.get("prompt")
+            author_id = dream.get("author_id")
+            prompt = dd_prompt_salad.make_random_prompt(amount=1, prompt_salad_path="prompt_salad", template=template)[0]
+
         prompt_hash = str(hashlib.sha256(prompt.encode('utf-8')).hexdigest())
         params = {
             "weights" : weights_hash,
@@ -3945,7 +4005,7 @@ def v3_dream(agent_info):
         "nsfw" : False,
         "private" : False,
         "status" : "processing",
-        "origin" : "dream",
+        "origin" : origin,
         "prompt_hash" : prompt_hash,
         "algo" : "stable",
         "width_height" : width_height,

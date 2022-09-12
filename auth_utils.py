@@ -22,6 +22,8 @@ AUTH0_ALGORITHMS = ["RS256"]
 AUTH0_MGMT_API_CLIENT_ID=os.getenv("AUTH0_MGMT_API_CLIENT_ID")
 AUTH0_MGMT_API_SECRET=os.getenv("AUTH0_MGMT_API_SECRET")
 
+usercache = {}
+
 def requires_auth(f):
     """Determines if the Access Token is valid"""
     @wraps(f)
@@ -71,7 +73,7 @@ def supports_auth(f):
             return f(*args, **kwargs)
 
         rsa_key = {}
-
+        user_info = None
         for key in jwks["keys"]:
             if key["kid"] == unverified_header["kid"]:
                 rsa_key = {"kty": key["kty"], "kid": key["kid"], "use": key["use"], "n": key["n"], "e": key["e"]}
@@ -79,7 +81,7 @@ def supports_auth(f):
             try:
                 payload = jwt.decode(token, rsa_key, algorithms=AUTH0_ALGORITHMS, audience=AUTH0_API_AUDIENCE, issuer="https://" + AUTH0_DOMAIN + "/")
                 _request_ctx_stack.top.current_user = payload
-                user_info = user_pulse(payload)
+                user_info = user_pulse(payload, True)
                 _request_ctx_stack.top.user_info = user_info
             except jwt.ExpiredSignatureError:
                 pass
@@ -141,34 +143,39 @@ def user_pulse(current_user, update_db):
     # logger.info(f"💓 User activity from {current_user}")
     access_token = get_auth0_mgmt_token()["access_token"]
     try:
-        path = f"/api/v2/users/{urllib.parse.quote(current_user['sub'])}"
-        conn = http.client.HTTPSConnection("dev-yqzsn326.auth0.com")
-        conn.request("GET", path, headers={
-            'authorization': f"Bearer {access_token}"
-        })
-        res = conn.getresponse()
-        data = res.read()
-        user_info=loads(data.decode("utf-8"))
+        if usercache[access_token]:
+            user_info = usercache[access_token]
     except:
-        import traceback
-        tb = traceback.format_exc()
-        user_info={}
-        logger.error(tb)
+        try:
+            path = f"/api/v2/users/{urllib.parse.quote(current_user['sub'])}"
+            conn = http.client.HTTPSConnection("dev-yqzsn326.auth0.com")
+            conn.request("GET", path, headers={
+                'authorization': f"Bearer {access_token}"
+            })
+            res = conn.getresponse()
+            data = res.read()
+            user_info=loads(data.decode("utf-8"))
+            usercache["access_token"] = user_info
+        except:
+            import traceback
+            tb = traceback.format_exc()
+            user_info={}
+            logger.error(tb)
+            usercache["access_token"] = None
 
     discord_id = int(current_user["sub"].split("|")[2])
 
-    if update_db:
-        # logger.info(f"📅 Updating user")
-        with get_database() as client:
-            client.database.users.update_one({
-                "user_id": discord_id
-            }, {
-                "$set": {
-                    "last_seen": datetime.utcnow(),
-                    "nickname": user_info["nickname"],
-                    "picture": user_info["picture"]
-                }
-            },
-            upsert=True)
+    # logger.info(f"📅 Updating user")
+    with get_database() as client:
+        client.database.users.update_one({
+            "user_id": discord_id
+        }, {
+            "$set": {
+                "last_seen": datetime.utcnow(),
+                "nickname": user_info["nickname"],
+                "picture": user_info["picture"]
+            }
+        },
+        upsert=True)
 
     return user_info

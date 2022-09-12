@@ -72,7 +72,9 @@ def updateJob(data):
         r = requests.post(api, data=data, headers={"x-dd-bot-token": BOT_TOKEN}, timeout=10).json()
         logger.info(f"Job updated.")
     except:
-        logger.info("Update Job timed out.")
+        logger.error("Update Job timed out.")
+        tb = traceback.format_exc()
+        logger.error(tb)
         r = None
     return r
 
@@ -245,7 +247,7 @@ async def processLogs():
 
 async def processCompletedJobs():
     for kind in [{
-        "url":f"{BOT_API}/queue/complete/"
+        "url":f"{BOT_API}/discord/queue/"
     }]:
         api = kind["url"]
         logger.info(f"🌍 Getting completed jobs from '{api}'...")
@@ -260,11 +262,8 @@ async def processCompletedJobs():
         else:
             logger.info(f"{len(completedJobs)} completed jobs found...")
             for completedJob in completedJobs:
-                algo = completedJob.get("job")
-                if algo == "disco":
-                    logger.info(f"Found completed job: {completedJob.get('uuid')} | Render Type: {completedJob.get('render_type')}")
-                    render_type = completedJob.get("render_type")
-                
+                algo = completedJob.get("algo")
+                origin = completedJob.get("origin")
                 nsfw = completedJob.get("nsfw")
                 
                 if algo == "disco":
@@ -296,6 +295,10 @@ async def processCompletedJobs():
                     
                 if algo == "stable":
                     channel = "stable-images"
+                    if origin == "dream":
+                        channel = "stable-dreams"
+                    if origin == "hallucination":
+                        channel = "hallucinations"
                 
                 if nsfw == True:
                     channel = "nightmare-fuel"
@@ -305,21 +308,18 @@ async def processCompletedJobs():
                 for channel in channels:
                     channel = discord.utils.get(bot.get_all_channels(), name=channel)
                     try:
-                        if algo == "disco":
-                            settings = ""
-                            await channel.send(f"<@{completedJob.get('author')}>\nhttps://www.feverdreams.app/piece/{completedJob.get('uuid')}")
-                        if algo == "stable":
-                            settings = ""
-                            if not completedJob.get('private'):
-                                settings = f"\n`{completedJob.get('prompt')}`\nSeed: `{completedJob.get('seed')}` | Steps: `{completedJob.get('steps')}` | Scale: `{completedJob.get('scale')}` | ETA: `{completedJob.get('eta')}`"
-                                
-                            await channel.send(f"<@{completedJob.get('author')}>{settings}\nhttps://www.feverdreams.app/piece/{completedJob.get('uuid')}")
+                        settings = ""
+                        if not completedJob.get('private'):
+                            params = completedJob.get('params')
+                            settings = f"\n`{params['prompt']}`\nSeed: `{params['seed']}` | Steps: `{params['steps']}` | Scale: `{params['scale']}` | ETA: `{params['eta']}`"
+                            
+                        msg_id = await channel.send(f"<@{completedJob.get('author')}>{settings}\nhttps://www.feverdreams.app/piece/{completedJob.get('uuid')}")
                     except Exception as e:
                         tb = traceback.format_exc()
                         await channel.send(f"💀 Cannot display {completedJob.get('uuid')}\n`{tb}`")
                 
                 
-                updateJob({"uuid": completedJob.get("uuid"), "status": "archived"})
+                updateJob({"uuid": completedJob.get("uuid"), "discord_message_id": msg_id.id, "discord_channel_id": channel.id})
                 
 
 
@@ -360,7 +360,7 @@ async def processFailedJobs():
                     rejectedCount += 1
                 else:
                     rejectedCount = 0
-                updateJob({"uuid": failedJob.get("uuid"), "status": "rejected", "rejectedCount": rejectedCount})
+                updateJob({"collection":"queue","uuid": failedJob.get("uuid"), "status": "rejected", "rejectedCount": rejectedCount})
 
 
 async def processStalledJobs():
@@ -377,7 +377,7 @@ async def processStalledJobs():
                 color=discord.Colour.orange(),
             )
             await channel.send(embed=embed)
-        updateJob({"uuid": stall.get("uuid"), "status": "queued", "agent_id": None, "percent": None, "last_preview": None, "timestamp": datetime.datetime.now()})
+        updateJob({"collection": "queue", "uuid": stall.get("uuid"), "status": "queued", "agent_id": None, "percent": None, "last_preview": None, "timestamp": datetime.datetime.now()})
     # Drop any events for performance
 
 
