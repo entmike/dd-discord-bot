@@ -23,6 +23,52 @@ AUTH0_MGMT_API_CLIENT_ID=os.getenv("AUTH0_MGMT_API_CLIENT_ID")
 AUTH0_MGMT_API_SECRET=os.getenv("AUTH0_MGMT_API_SECRET")
 
 usercache = {}
+permissioncache = {}
+
+def my_permissions():
+    # access_token = get_auth0_mgmt_token()["access_token"]
+    current_user = _request_ctx_stack.top.current_user
+    # User Permissions
+    path = f"/api/v2/users/{urllib.parse.quote(current_user['sub'])}/permissions"
+    conn = http.client.HTTPSConnection("dev-yqzsn326.auth0.com")
+    conn.request("GET", path, headers={
+        'authorization': f"Bearer {access_token}"
+    })
+    res = conn.getresponse()
+    data = res.read()
+    perms=loads(data.decode("utf-8"))
+    return perms
+    
+def requires_permission(perm):
+    """Determines if the required scope is present in the Access Token
+    Args:
+        required_scope (str): The scope required to access the resource
+    """
+    # access_token = get_auth0_mgmt_token()["access_token"]
+    current_user = _request_ctx_stack.top.current_user
+    # logger.info(f"🔏 Checking {current_user['sub']} for permissions '{perm}'...")
+    try:
+        if current_user['sub'] in permissioncache:
+            for permission in permissioncache[current_user['sub']]:
+                # logger.info(permission)
+                if permission["permission_name"] == perm:
+                    # logger.info(f"🔐 Permission {perm} found.")
+                    return True
+        else:
+            return False
+    except:
+        return False
+
+def requires_vetting(f):
+    """Determines if the Access Token is valid and user is vetted"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        user_pass = _request_ctx_stack.top.user_pass
+        if not user_pass:
+            raise AuthError({"code": "not_vetted", "description": "You may not use this API until your user account is vetted."}, 401)
+        else:
+            return f(*args, **kwargs)
+    return decorated
 
 def requires_auth(f):
     """Determines if the Access Token is valid"""
@@ -31,6 +77,7 @@ def requires_auth(f):
         token = get_token_auth_header()
         jsonurl = urlopen("https://" + AUTH0_DOMAIN + "/.well-known/jwks.json")
         jwks = json.loads(jsonurl.read())
+        # access_token = get_auth0_mgmt_token()["access_token"]
         unverified_header = jwt.get_unverified_header(token)
         rsa_key = {}
         for key in jwks["keys"]:
@@ -48,8 +95,20 @@ def requires_auth(f):
 
             _request_ctx_stack.top.current_user = payload
             user_info = user_pulse(payload, True)
+            if "banned" in user_info:
+                logger.info(f"🔨 Banned user attempt from: {user_info}")
+                if user_info["banned"] == True:
+                    raise AuthError({"code": "banned", "description": "User is banned from API"}, 401)
+            
+            if "pass" not in user_info or user_info["pass"] == False:
+                logger.info(f"🆕 New user attempt from: {user_info}")
+                user_pass = False
+            else:
+                user_pass = True
+
             _request_ctx_stack.top.user_info = user_info
-            logger.info(f"👤 {user_info}")
+            _request_ctx_stack.top.user_pass = user_pass
+            # logger.info(f"👤 {user_info}")
 
             return f(*args, **kwargs)
         raise AuthError({"code": "invalid_header", "description": "Unable to find appropriate key"}, 401)
@@ -66,10 +125,9 @@ def supports_auth(f):
         _request_ctx_stack.top.user_info = None
         try:
             token = get_token_auth_header()
-            logger.info(token)
             unverified_header = jwt.get_unverified_header(token)            
         except:
-            logger.info(f"👤 Unauthenticated request, allowing.")
+            # logger.info(f"👤 Unauthenticated request, allowing.")
             return f(*args, **kwargs)
 
         rsa_key = {}
@@ -93,7 +151,7 @@ def supports_auth(f):
                 pass
                 # raise AuthError({"code": "invalid_header", "description": "Unable to parse authentication token."}, 401)
 
-        logger.info(f"👤 {user_info}")
+        # logger.info(f"👤 {user_info}")
         return f(*args, **kwargs)
 
         # raise AuthError({"code": "invalid_header", "description": "Unable to find appropriate key"}, 401)
@@ -140,42 +198,94 @@ def get_auth0_mgmt_token():
     return loads(data.decode("utf-8"))
 
 def user_pulse(current_user, update_db):
-    # logger.info(f"💓 User activity from {current_user}")
-    access_token = get_auth0_mgmt_token()["access_token"]
-    try:
-        if usercache[access_token]:
-            user_info = usercache[access_token]
-    except:
-        try:
-            path = f"/api/v2/users/{urllib.parse.quote(current_user['sub'])}"
+    # logger.info(f"💓 User activity from {current_user['sub']}")
+    discord_id = int(current_user["sub"].split("|")[2])
+    user_info = {}
+    if current_user['sub'] in usercache:
+        user_info = usercache[current_user['sub']]
+    else:
+        with get_database() as client:
+            u = client.database.users.find_one({
+                "user_id": discord_id
+            })
+            # If user info not in DB....
+            if not u or not u.get("user_info"):
+                # logger.info(f"🌍 Looking up {current_user['sub']}...")
+                path = f"/api/v2/users/{urllib.parse.quote(current_user['sub'])}"
+                conn = http.client.HTTPSConnection("dev-yqzsn326.auth0.com")
+                # access_token = get_auth0_mgmt_token()["access_token"]
+                conn.request("GET", path, headers={
+                    'authorization': f"Bearer {access_token}"
+                })
+                res = conn.getresponse()
+                data = res.read()
+                user_info=loads(data.decode("utf-8"))
+                try:
+                    nickname = user_info["nickname"]
+                    picture = user_info["picture"]
+                except:
+                    nickname = "Unknown"
+                    picture = "Unknown"
+                
+                # logger.info(f"📅 Updating user")
+                client.database.users.update_one({
+                    "user_id": discord_id
+                }, {
+                    "$set": {
+                        "user_info" : user_info,
+                        "last_seen": datetime.utcnow(),
+                        "nickname": nickname,
+                        "picture": picture
+                    }
+                },
+                upsert=True)
+            else:
+                # logger.info(f"Already have user metadata for {current_user['sub']}")
+                user_info = u.get("user_info")
+
+        
+        if "error" not in user_info:
+            # User Permissions
+            # logger.info(f"🌍 Looking up permissions for {current_user['sub']}...")
+            path = f"/api/v2/users/{urllib.parse.quote(current_user['sub'])}/permissions"
             conn = http.client.HTTPSConnection("dev-yqzsn326.auth0.com")
             conn.request("GET", path, headers={
                 'authorization': f"Bearer {access_token}"
             })
             res = conn.getresponse()
             data = res.read()
-            user_info=loads(data.decode("utf-8"))
-            usercache["access_token"] = user_info
-        except:
-            import traceback
-            tb = traceback.format_exc()
-            user_info={}
-            logger.error(tb)
-            usercache["access_token"] = None
+            perms=loads(data.decode("utf-8"))
+            permissioncache[current_user['sub']] = perms
+        else:
+            user_info = None
+            del usercache[current_user['sub']]
+            del permissioncache[current_user['sub']]
+        # except:
+        #     import traceback
+        #     tb = traceback.format_exc()
+        #     user_info={}
+        #     logger.error(tb)
+        #     if current_user['sub'] in usercache:
+        #         del usercache[current_user['sub']]
+        #     if current_user['sub'] in permissioncache:
+        #         del permissioncache[current_user['sub']]
 
-    discord_id = int(current_user["sub"].split("|")[2])
 
-    # logger.info(f"📅 Updating user")
     with get_database() as client:
-        client.database.users.update_one({
+        u = client.database.users.find_one({
             "user_id": discord_id
-        }, {
-            "$set": {
-                "last_seen": datetime.utcnow(),
-                "nickname": user_info["nickname"],
-                "picture": user_info["picture"]
-            }
-        },
-        upsert=True)
+        })
+        if u:
+            if u.get("banned") == True:
+                user_info["banned"] = True
+            if u.get("pass") == True:
+                user_info["pass"] = True
+            else:
+                user_info["pass"] = False
+        
+        usercache[current_user['sub']] = user_info
+        
 
     return user_info
+
+access_token = get_auth0_mgmt_token()["access_token"]

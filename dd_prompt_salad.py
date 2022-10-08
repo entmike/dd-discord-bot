@@ -26,7 +26,7 @@ def make_random_prompt(template="{colors} {things} in the {custom/customword} sh
             re.I | re.M | re.A | re.M,
         )[0]
         promptList.append(matcher(template, prompt_dict))
-    logger.debug(promptList)
+    # logger.debug(promptList)
     return promptList
 
 
@@ -34,7 +34,8 @@ def main():
     promptList = make_random_prompt(amount=5)
     print(promptList)
     for k in promptList:
-        print(k)
+        pass
+        # print(k)
 
 
 if __name__ == "__main__":

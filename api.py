@@ -142,7 +142,7 @@ def s3_thumbnail(job_uuid, size, algo="disco"):
         img.thumbnail((int(size), int(size)), Image.LANCZOS)
         thumbfile = f"thumb_{size}_{job_uuid}.jpg"
         fn = os.path.join(app.config["UPLOAD_FOLDER"], thumbfile)
-        logger.info(f"👍: {fn}")
+        # logger.info(f"👍: {fn}")
         img.save(fn, "JPEG")
         upload_file_s3(fn, BOT_S3_BUCKET, f"thumbs/{size}/{job_uuid}.jpg", {"ContentType": "image/jpeg"})
         os.remove(thumbfile)
@@ -205,21 +205,46 @@ def log(message, title="Message"):
         logTable = client.database.get_collection("logs")
         logTable.insert_one({"timestamp": datetime.utcnow(), "message": message, "title": title, "ack": False, "uuid": str(uuid.uuid4())})
 
+@app.route("/syncpins")
+def syncpins():
+    with get_database() as client:
+        r = list(client.database.pins.aggregate([
+        { "$group" :
+            {
+                "_id" : "$uuid",
+                "count" : { "$sum": 1 }
+            }
+        }
+        ]))
+        for row in r:
+            client.database.pieces.update_one({
+                    "uuid" : row.get("_id")
+                }, {
+                "$set": {
+                    "pins" : row.get("count")
+                }
+            })
+            logger.info(row.get("_id"))
+    
+    return dumps({"success" : True, "message": "Pins sync complete"})
 
 @app.route("/pin/<uuid>", methods=["POST","DELETE"])
 @requires_auth
 def pin(uuid):
     current_user = _request_ctx_stack.top.current_user
-    discord_id = int(current_user["sub"].split("|")[2])
+    if current_user:
+        user_id = int(current_user["sub"].split("|")[2])
+    else:
+        user_id = None
     if request.method == "DELETE":
         with get_database() as client:
-            client.database.pins.delete_many({"user_id": discord_id, "uuid" : uuid})
-            return dumps({"success" : True, "message": f"📌 Unpinned {uuid} for {discord_id}"})
+            client.database.pins.delete_many({"user_id": user_id, "uuid" : uuid})
+            message = f"📌 Unpinned {uuid} for {user_id}"
 
     if request.method == "POST":
         with get_database() as client:
             client.database.pins.update_one({
-                    "user_id": discord_id,
+                    "user_id": user_id,
                     "uuid" : uuid
                 }, {
                 "$set": {
@@ -227,8 +252,222 @@ def pin(uuid):
                     "uuid": uuid
                 }
             }, upsert=True)
-        
-        return dumps({"success" : True, "message": "Pinned"})
+            message = f"📌 Pinned {uuid} for {user_id}"
+    
+    with get_database() as client:
+        # Update counts
+        count = len(list(client.database.pins.aggregate([
+            {"$match":{"uuid" : uuid}}
+        ])))
+        client.database.pieces.update_many({
+            "uuid" : uuid
+        }, {
+            "$set": {
+                "pins" : count
+            }
+        })
+
+    return dumps({"success" : True, "message": message})
+
+@app.route("/v3/myinvites", methods=["GET"])
+@requires_auth
+def myinvites():
+    current_user = _request_ctx_stack.top.current_user
+    discord_id = int(current_user["sub"].split("|")[2])
+    with get_database() as client:
+        invites = list(client.database.invites.aggregate([
+            {"$match":{"user_id" : discord_id}},
+            {"$lookup": {"from": "vw_users", "localField": "redeemed", "foreignField": "user_id", "as": "userdets"}},
+            {"$unwind": {
+                "path": "$userdets",
+                "preserveNullAndEmptyArrays" : True
+            }},
+        ]))
+        return dumps(invites)
+
+@app.route("/redeeminvite", methods=["POST"])
+@requires_auth
+def redeeminvite():
+    current_user = _request_ctx_stack.top.current_user
+    discord_id = int(current_user["sub"].split("|")[2])
+    with get_database() as client:
+        # Make sure user need invite
+        u = client.database.users.find_one({
+            "user_id": discord_id,
+            "pass" : {"$ne":True}
+        })
+        # If user needs invite, proceed
+        if u:
+            # Get invite code
+            invite_code = job = request.json.get("invite_code")
+            # Invite code query
+            q = {
+                "invite_code" : invite_code,
+                "redeemed" : {"$exists" : False}
+            }
+            # Find invite
+            invite = client.database.invites.find_one(q)
+            # If invite exists, proceed
+            if invite:
+                referrer = invite.get("user_id")
+                # Mark user as vetted
+                client.database.users.update_one({
+                    "user_id": discord_id
+                },{
+                    "$set" : {
+                        "pass" : True,
+                        "referrer" : referrer
+                    }
+                })
+
+                # Mark invite as used
+                client.database.invites.update_one(q,{
+                    "$set" : {
+                        "redeemed" : discord_id,
+                        "redeemed_timestamp" : datetime.utcnow()
+                    }
+                })
+                return dumps({
+                    "success" : True,
+                    "invites" : "🥳 Welcome to Fever Dreams!"
+                })
+            else:
+                # Invalid invite
+                return dumps({
+                    "success" : False,
+                    "message" : "Invalid invite.  Please check your code."
+                })
+        else:
+            # User already has invite
+            return dumps({
+                "success" : False,
+                "message" : "You are already vetted.  Code not needed."
+            })
+
+
+@app.route("/generateinvite", methods=["POST"])
+@requires_auth
+@requires_vetting
+def generateinvite():
+    current_user = _request_ctx_stack.top.current_user
+    discord_id = int(current_user["sub"].split("|")[2])
+    with get_database() as client:
+        invites = 0
+        u = client.database.users.find_one({
+            "user_id": discord_id
+        })
+        if u:
+            invites = u.get("invites")
+            if invites and invites > 0:
+                invites = invites - 1
+
+                client.database.users.update_one({
+                    "user_id": discord_id
+                },{
+                    "$set" : {"invites" : invites}
+                })
+
+                client.database.invites.insert_one({
+                    "user_id": discord_id,
+                    "invite_code" : str(uuid.uuid4()),
+                    "timestamp" : datetime.utcnow()
+                })
+
+        return dumps({
+            "success" : True,
+            "invites" : invites
+        })
+
+@app.route("/undelete/<uuid>", methods=["POST"])
+@requires_auth
+@requires_vetting
+def undelete(uuid):
+    current_user = _request_ctx_stack.top.current_user
+    discord_id = int(current_user["sub"].split("|")[2])
+    with get_database() as client:
+        piece = client.database.deleted_pieces.find_one({
+            "uuid":uuid,
+            "author": discord_id
+        })
+        if piece:
+            piece["timestamp_completed"] = datetime.utcnow()
+            piece["deleted"] = False
+            if request.method == "POST":
+                try:
+                    client.database.deleted_pieces.delete_many({"author": discord_id, "uuid" : uuid})
+                    # Potential Cleanup Oct/2022
+                    client.database.pieces.delete_many({"author": discord_id, "uuid" : uuid})
+                    dest = client.database.reviews.find_one({ "uuid":uuid, "author": discord_id })
+                    if not dest:
+                        client.database.reviews.insert_one(piece)
+                    message = f"✅ Undeleted {uuid} for {discord_id}"
+                    success = True
+                except:
+                    message = f"🪰 Could not undelete {uuid} for {discord_id}"
+                    success = False
+                return dumps({"success" : True, "message": message})
+        else:
+            return dumps({"success" : False, "message": "Could not undelete."})
+    
+@app.route("/delete/<uuid>", methods=["POST"])
+@requires_auth
+@requires_vetting
+def delete(uuid):
+    current_user = _request_ctx_stack.top.current_user
+    discord_id = int(current_user["sub"].split("|")[2])
+    with get_database() as client:
+        piece = client.database.pieces.find_one({
+            "uuid":uuid,
+            "author": discord_id
+        })
+        if piece:
+            piece["timestamp_completed"] = datetime.utcnow()
+            piece["deleted"] = True
+            if request.method == "POST":
+                try:
+                    client.database.reviews.delete_many({"author": discord_id, "uuid" : uuid})
+                    client.database.pieces.delete_many({"author": discord_id, "uuid" : uuid})
+                    dest = client.database.deleted_pieces.find_one({ "uuid":uuid, "author": discord_id })
+                    if not dest:
+                        client.database.deleted_pieces.insert_one(piece)
+                    message = f"✅ Deleted {uuid} for {discord_id}"
+                    success = True
+                except:
+                    message = f"🪰 Could not delete {uuid} for {discord_id}"
+                    success = False
+                return dumps({"success" : success, "message": message})
+        else:
+            return dumps({"success" : False, "message": "Could not delete."})
+
+@app.route("/review/<uuid>", methods=["POST","DELETE"])
+@requires_auth
+@requires_vetting
+def review(uuid):
+    current_user = _request_ctx_stack.top.current_user
+    discord_id = int(current_user["sub"].split("|")[2])
+    with get_database() as client:
+        piece = client.database.reviews.find_one({
+            "uuid":uuid,
+            "author": discord_id
+        })
+        if piece:
+            piece["timestamp_completed"] = datetime.utcnow()
+            if request.method == "DELETE":
+                try:
+                    client.database.deleted_pieces.insert_one(piece)
+                except:
+                    #probably a duplicate
+                    pass
+                client.database.reviews.delete_many({"author": discord_id, "uuid" : uuid})
+                message = f"♻️ Deleted {uuid} for {discord_id}"
+            if request.method == "POST":
+                client.database.pieces.insert_one(piece)
+                client.database.discord_queue.insert_one(piece)
+                client.database.reviews.delete_many({"author": discord_id, "uuid" : uuid})
+                message = f"✅ Saved {uuid} for {discord_id}"
+    
+    return dumps({"success" : True, "message": message})
+
 
 @app.route("/nope/<uuid>", methods=["GET"])
 def nope(uuid):
@@ -239,6 +478,7 @@ def nope(uuid):
 
 @app.route("/hide/<uuid>", methods=["POST","DELETE"])
 @requires_auth
+@requires_vetting
 def hide(uuid):
     current_user = _request_ctx_stack.top.current_user
     discord_id = int(current_user["sub"].split("|")[2])
@@ -269,7 +509,7 @@ def following():
                     { "$match": { "$expr": { "$eq": [ "$user_id", "$$userId" ] } } },
                     { "$lookup" : {
                     "as" : "details",
-                    "from" : "users",
+                    "from" : "vw_users",
                     "let" : {"followId" : "$follow_id"
                 },
                     "pipeline" : [   
@@ -289,44 +529,55 @@ def following():
         following = list(following)
         return dumps(following)
 
-@app.route("/following/feed", methods=["GET"])
+@app.route("/following/feed/<amount>", methods=["GET"], defaults={"page": 1})
+@app.route("/following/feed/<amount>/<page>", methods=["GET"])
 @requires_auth
-def following_feed():
+def following_feed(amount, page):
     current_user = _request_ctx_stack.top.current_user
     discord_id = int(current_user["sub"].split("|")[2])
     logger.info(f"Request for following feed by {discord_id}...")
+
     with get_database() as client:
-        following = client.database.get_collection("follows").aggregate([
+        follows = list(client.database.get_collection("follows").aggregate([
             {
                 '$match': {
                     'user_id': discord_id
                 }
-            }, {
-                '$lookup': {
-                    'from': 'completed_clean', 
-                    'localField': 'author_id', 
-                    'foreignField': 'follow_id', 
-                    'as': 'jobs'
-                }
-            }, {
-                '$unwind': '$jobs'
-            }, {
-                '$project': {
-                    'follow_id': 1, 
-                    'uuid': "$jobs.uuid",
-                    'thumbnails': "$jobs.thumbnails",
-                    'text_prompt' : "$jobs.text_prompt"
-                    # 'jobs': {
-                    #     'uuid': 1, 
-                    #     'text_prompt': 1,
-                    #     'thumbnails' : 1
-                    # }
-                }
-            },{
-                '$limit': 100
             }
-        ])
+        ]))
+        f = []
+        for follow in follows:
+            f.append(follow["follow_id"])
+        logger.info(f)
+        following = client.database.get_collection("pieces").aggregate([
+            {
+                '$match': {
+                    'author': { "$in" : f},
+                    "nsfw": {"$nin": [True]},
+                    "hide": {"$nin": [True]},
+                    "thumbnails" : {"$exists" : True},
+                    "origin": "web",
+                    "status" : "complete"
+                }
+            },
+            {"$sort": {"timestamp_completed": -1}},
+            {"$lookup": {"from": "vw_users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+            {"$skip": (int(page) - 1) * int(amount)},
+            {"$limit": int(amount)},
+            {"$unwind": {
+                "path": "$userdets",
+                "preserveNullAndEmptyArrays" : True
+            }},
+            {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
+            ])
         following = list(following)
+        for piece in following:
+            try:
+                if piece["private"] and piece["author"] != discord_id:
+                    del piece["params"]
+            except:
+                pass
+
         return dumps(following)
 
 @app.route("/follow/<follow_id>", methods=["GET","POST","DELETE"])
@@ -369,89 +620,60 @@ def follow(follow_id):
         
         return dumps({"following": following})
 
-@app.route("/v2/recent/<type>/<amount>", methods=["GET"], defaults={"page": 1})
-@app.route("/v2/recent/<type>/<amount>/<page>")
-def v2_recent_images2(type, amount, page):
-    q = {
-        "status": {
-            "$in":["archived","complete"]
-        },
-        "nsfw": {"$nin": [True]},
-        "render_type": {"$ne": "sketch"}}
-    
-    if type == "disco":
-        q["algo"] = {"$ne" : "stable"}
-    
-    if type == "stable":
-        q["algo"] = "stable"
-    
-    if type == "general":
-        q["diffusion_model"] = {"$in" : ["512x512_diffusion_uncond_finetune_008100","256x256_diffusion_uncond"]}
 
-    if type == "portraits":
-        q["diffusion_model"] = {"$in" : [
-            "portrait_generator_v001_ema_0.9999_1MM",
-            "portrait_generator_v1.5_ema_0.9999_165000",
-            "portrait_generator_v003",
-            "portrait_generator_v004",
-            "512x512_diffusion_uncond_entmike_ffhq_025000",
-            "512x512_diffusion_uncond_entmike_ffhq_145000",
-            "512x512_diffusion_uncond_entmike_ffhq_260000"
-            ]}
+# @app.route("/fixdels", methods=["GET"])
+# def fix_dels():
+#     with get_database() as client:
+#         r = client.database.deleted_pieces.aggregate([
+            
+#         ])
+#         dels = list(r)
+#         print(len(dels))
+#         for d in dels:
+#             logger.info(f"♻️ Deleting {d.get('uuid')}")
+#             client.database.reviews.delete_many({
+#                 "uuid" : d.get("uuid")
+#             })
+        
+#         return json.dumps({"success":True})
 
-    if type == "isometric":
-        q["diffusion_model"] = {"$in" : ["IsometricDiffusionRevrart512px"]}
+# @app.route("/fixdels2", methods=["GET"])
+# def fix_dels2():
+#     with get_database() as client:
+#         r = client.database.pieces.aggregate([
+            
+#         ])
+#         dels = list(r)
+#         print(len(dels))
+#         for d in dels:
+#             logger.info(f"♻️ Deleting {d.get('uuid')}")
+#             client.database.deleted_pieces.delete_many({
+#                 "uuid" : d.get("uuid")
+#             })
+        
+#         return json.dumps({"success":True})
 
-    if type == "pixel-art":
-        q["diffusion_model"] = {"$in" : ["pixel_art_diffusion_hard_256","pixel_art_diffusion_soft_256","pixelartdiffusion4k"]}
-
-    if type == "paint-pour":
-        q["diffusion_model"] = {"$in" : ["PaintPourDiffusion_v1.0","PaintPourDiffusion_v1.1","PaintPourDiffusion_v1.2","PaintPourDiffusion_v1.3"]}
-    
-    with get_database() as client:
-        r = client.database.queue.aggregate(
-            [
-                {"$project": { "_id": 0 } },
-                {"$unionWith": { "coll": "stable_jobs", "pipeline": [ { "$project": { "_id": 0 } } ]} },
-                {"$match": q},
-                {"$addFields": {"str_timestamp": {"$toString": "$timestamp"}}},
-                {"$addFields": {"dt_timestamp": {"$dateFromString": {"dateString": "$str_timestamp"}}}},
-                {"$sort": {"dt_timestamp": -1}},
-                {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
-                {"$skip": (int(page) - 1) * int(amount)},
-                {"$limit": int(amount)},
-                {"$unwind": {
-                    "path": "$userdets",
-                    "preserveNullAndEmptyArrays" : True
-                }},
-                {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
-            ]
-        )
-        return dumps(r)
-
-
-
-@app.route("/recent/<amount>", methods=["GET"], defaults={"page": 1})
-@app.route("/recent/<amount>/<page>")
-def recent_images2(amount, page):
-    with get_database() as client:
-        r = client.database.get_collection("queue").aggregate(
-            [
-                {"$match": {"status": {"$in":["archived","complete"]}, "nsfw": {"$nin": [True]}, "render_type": {"$ne": "sketch"}}},
-                {"$addFields": {"str_timestamp": {"$toString": "$timestamp"}}},
-                {"$addFields": {"dt_timestamp": {"$dateFromString": {"dateString": "$str_timestamp"}}}},
-                {"$sort": {"dt_timestamp": -1}},
-                {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
-                {"$skip": (int(page) - 1) * int(amount)},
-                {"$limit": int(amount)},
-                {"$unwind": {
-                    "path": "$userdets",
-                    "preserveNullAndEmptyArrays" : True
-                }},
-                {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
-            ]
-        )
-        return dumps(r)
+# @app.route("/recent/<amount>", methods=["GET"], defaults={"page": 1})
+# @app.route("/recent/<amount>/<page>")
+# def recent_images2(amount, page):
+#     with get_database() as client:
+#         r = client.database.get_collection("queue").aggregate(
+#             [
+#                 {"$match": {"status": {"$in":["archived","complete"]}, "nsfw": {"$nin": [True]}, "render_type": {"$ne": "sketch"}}},
+#                 {"$addFields": {"str_timestamp": {"$toString": "$timestamp"}}},
+#                 {"$addFields": {"dt_timestamp": {"$dateFromString": {"dateString": "$str_timestamp"}}}},
+#                 {"$sort": {"dt_timestamp": -1}},
+#                 {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+#                 {"$skip": (int(page) - 1) * int(amount)},
+#                 {"$limit": int(amount)},
+#                 {"$unwind": {
+#                     "path": "$userdets",
+#                     "preserveNullAndEmptyArrays" : True
+#                 }},
+#                 {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
+#             ]
+#         )
+#         return dumps(r)
 
 
 @app.route("/random/<type>/<amount>", methods=["GET"])
@@ -485,7 +707,7 @@ def v3_random(type, amount):
         operations = [
             {"$match": q},
             {"$sample": {"size": int(amount)}},
-            {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+            {"$lookup": {"from": "vw_users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
             {"$unwind": {
                 "path": "$userdets",
                 "preserveNullAndEmptyArrays" : True
@@ -529,49 +751,49 @@ def v3_random(type, amount):
 
         return dumps(r)
 
-@app.route("/v2/userfeed/<user_id>/<amount>", methods=["GET"], defaults={"page": 1})
-@app.route("/v2/userfeed/<user_id>/<amount>/<page>")
-def v2_userfeed(user_id, amount, page):
-    args = request.args   
-    q = {
-        "status": {"$in":["archived","complete"]},
-        "author_id": int(user_id),
-        "nsfw": {"$nin": [True]},
-        "hide": {"$nin": [True]},
-    }
+# @app.route("/v2/userfeed/<user_id>/<amount>", methods=["GET"], defaults={"page": 1})
+# @app.route("/v2/userfeed/<user_id>/<amount>/<page>")
+# def v2_userfeed(user_id, amount, page):
+#     args = request.args   
+#     q = {
+#         "status": {"$in":["archived","complete"]},
+#         "author_id": int(user_id),
+#         "nsfw": {"$nin": [True]},
+#         "hide": {"$nin": [True]},
+#     }
     
-    if(args.get("hide")=="include"):
-        del q["hide"]
+#     if(args.get("hide")=="include"):
+#         del q["hide"]
 
-    if(args.get("nsfw")=="include"):
-        del q["nsfw"]
+#     if(args.get("nsfw")=="include"):
+#         del q["nsfw"]
 
-    if(args.get("nsfw")=="only"):
-        q["nsfw"] = True
+#     if(args.get("nsfw")=="only"):
+#         q["nsfw"] = True
 
-    with get_database() as client:
-        r = client.database.queue.aggregate(
-            [
-                {"$project": { "_id": 0 } },
-                {"$unionWith": { "coll": "stable_jobs", "pipeline": [ { "$project": { "_id": 0 } } ]} },
-                {
-                    "$addFields": {"author_id": {"$toLong": "$author"}},
-                },
-                {"$addFields": {"str_timestamp": {"$toString": "$timestamp"}}},
-                {"$addFields": {"dt_timestamp": {"$dateFromString": {"dateString": "$str_timestamp"}}}},
-                {"$match": q},
-                {"$sort": {"dt_timestamp": -1}},
-                {"$skip": (int(page) - 1) * int(amount)},
-                {"$limit": int(amount)},
-                {"$lookup": {"from": "users", "localField": "author_id", "foreignField": "user_id", "as": "userdets"}},
-                {"$unwind": {
-                    "path": "$userdets",
-                    "preserveNullAndEmptyArrays" : True
-                }},
-                {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
-            ]
-        )
-        return dumps(r)
+#     with get_database() as client:
+#         r = client.database.queue.aggregate(
+#             [
+#                 {"$project": { "_id": 0 } },
+#                 {"$unionWith": { "coll": "stable_jobs", "pipeline": [ { "$project": { "_id": 0 } } ]} },
+#                 {
+#                     "$addFields": {"author_id": {"$toLong": "$author"}},
+#                 },
+#                 {"$addFields": {"str_timestamp": {"$toString": "$timestamp"}}},
+#                 {"$addFields": {"dt_timestamp": {"$dateFromString": {"dateString": "$str_timestamp"}}}},
+#                 {"$match": q},
+#                 {"$sort": {"dt_timestamp": -1}},
+#                 {"$skip": (int(page) - 1) * int(amount)},
+#                 {"$limit": int(amount)},
+#                 {"$lookup": {"from": "users", "localField": "author_id", "foreignField": "user_id", "as": "userdets"}},
+#                 {"$unwind": {
+#                     "path": "$userdets",
+#                     "preserveNullAndEmptyArrays" : True
+#                 }},
+#                 {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
+#             ]
+#         )
+#         return dumps(r)
 
 @app.route("/getsince/<seconds>", methods=["GET"])
 def getsince(seconds):
@@ -610,7 +832,7 @@ def web_queue(status):
         queue = client.database.stable_jobs.aggregate(
             [
                 {"$match": q},
-                {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+                {"$lookup": {"from": "vw_users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
                 {"$unwind": {
                     "path": "$userdets",
                     "preserveNullAndEmptyArrays" : True
@@ -723,7 +945,7 @@ def nsfw():
 @app.route("/users")
 def users():
     with get_database() as client:
-        userCollection = client.database.get_collection("users")
+        userCollection = client.database.get_collection("vw_users")
         users = userCollection.find({})
         # logger.info(users)
         return dumps(users)
@@ -960,7 +1182,7 @@ def landingstats():
     with get_database() as client:
         since = datetime.utcnow() - timedelta(minutes=60)
         userCount = client.database.users.count_documents({})
-        completedCount = client.database.unified_jobs.count_documents({"status": "archived"})
+        completedCount = client.database.unified_jobs.count_documents({"status": {"$in" : ["complete","archived"]}})
         agentCount = client.database.agents.count_documents({"last_seen": {"$gt": since}})
         return dumps(
             {
@@ -1260,6 +1482,10 @@ def upload_file(agent_id, job_uuid):
             We are not expecting an upload from agent {agent_id} for job {job_uuid}.
             """
 
+@app.route("/mypermissions")
+@requires_auth
+def mypermissions():
+    return dumps(my_permissions())
 
 @app.route("/")
 def base():
@@ -1321,6 +1547,7 @@ def web_myjobs(status, page):
 
 @app.route("/upscale/<uuid>", methods=["GET","POST"])
 @requires_auth
+@requires_vetting
 def upscale(uuid):
     current_user = _request_ctx_stack.top.current_user
     discord_id = int(current_user["sub"].split("|")[2])
@@ -1455,10 +1682,12 @@ def v3_landingstats():
         since = datetime.utcnow() - timedelta(minutes=60)
         userCount = client.database.users.count_documents({})
         completedCount = client.database.pieces.count_documents({})
+        deletedCount = client.database.deleted_pieces.count_documents({})
+        reviewCount = client.database.reviews.count_documents({})
         agentCount = client.database.agents.count_documents({"last_seen": {"$gt": since}})
         return dumps(
             {
-                "completedCount": completedCount,
+                "completedCount": (completedCount + deletedCount + reviewCount),
                 "userCount": userCount,
                 "agentCount": agentCount,
             }
@@ -1508,35 +1737,160 @@ def v3_queuestats():
             {"queuedCount": queuedCount, "processingCount": processingCount, "renderedCount": renderedCount, "rejectedCount": rejectedCount, "completedCount": completedCount}
         )
 
-@app.route("/v3/myfavs/<amount>", methods=["GET"], defaults={"page": 1})
-@app.route("/v3/myfavs/<amount>/<page>")
-@supports_auth
-def v3_myfavs(amount, page):
+@app.route("/v3/tosagree", methods=["POST"])
+@requires_auth
+def tosagree():
     user_info = _request_ctx_stack.top.user_info
-    if user_info:
-        user_id = int(user_info["user_id"].split("|")[2])
+    current_user = _request_ctx_stack.top.current_user
+    user_id = int(current_user["sub"].split("|")[2])
+    tos_uuid = request.json.get("uuid")
+    with get_database() as client:
+        client.database.users.update_many({
+            "user_id" : user_id
+        },{
+            "$set" : {
+                "tos_agree" : tos_uuid,
+                "tos_agree_timestamp" : datetime.utcnow()
+            }
+        })
+        return dumps({
+            "success" : True,
+            "message" : f"🤝 Agreement {tos_uuid} accepted by {user_id}"
+        })
+
+@app.route("/v3/myinfo", methods=["GET"])
+@requires_auth
+def myinfo():
+    user_info = _request_ctx_stack.top.user_info
+    user_pass = _request_ctx_stack.top.user_pass
+    current_user = _request_ctx_stack.top.current_user
+    user_id = int(current_user["sub"].split("|")[2])
+    try:
+        with get_database() as client:
+            r = list(client.database.reviews.aggregate([
+                {"$match" : {"author":user_id}}
+            ]))
+            q = list(client.database.queue.aggregate([
+                {"$match" : {"author":user_id}}
+            ]))
+            tos = list(client.database.tos.aggregate([
+                {"$sort" : {"timestamp" : -1}},
+                {"$limit" : 1}
+            ]))
+            u = client.database.users.find_one({"user_id" : user_id})
+            invites = 0
+            if u:
+                invites = u.get("invites")
+                if not invites:
+                    invites = 0
+
+            tosAgree = list(client.database.users.aggregate([
+                {"$match" : {"user_id":user_id, "tos_agree" : tos[0].get("uuid")}}
+            ]))
+            agree = False
+            if len(tosAgree) > 0:
+                agree = True
+            return dumps({
+                "success" : True,
+                "reviews" : len(r),
+                "queue" : len(q),
+                "tos" : tos[0],
+                "invites" : invites,
+                "tosAgree" : agree,
+                "vetted" : user_pass
+            })
+    except:
+        tb = traceback.format_exc()
+        logger.error(tb)
+        return dumps({
+            "success" : False,
+            "message" : "An error occured while getting your info.",
+            "traceback" : tb
+        })
+
+@app.route("/v3/myreviews/<amount>", methods=["GET"], defaults={"page": 1})
+@app.route("/v3/myreviews/<amount>/<page>")
+@requires_auth
+def v3_myreviews(amount, page):
+    user_info = _request_ctx_stack.top.user_info
+    current_user = _request_ctx_stack.top.current_user
+    user_id = int(current_user["sub"].split("|")[2])
+
+    # if user_info:
+    #     user_id = int(user_info["user_id"].split("|")[2])
+    # else:
+    #     logger.error("Unknown user for myreviews.")
+    #     return dumps({
+    #         "success" : False,
+    #         "message" : "Unknown user.",
+    #         "traceback" : tb
+    #     })
+    
+    try:
+        q = {
+            "author_id": int(user_id),
+            "status" : "complete"
+        }
+
+        with get_database() as client:
+            operations = [
+                {
+                    "$addFields": {"author_id": {"$toLong": "$author"}},
+                },
+                {"$match": q},
+                {"$sort": {"time_completed": -1}},
+                {"$skip": (int(page) - 1) * int(amount)},
+                {"$limit": int(amount)},
+                
+            ]
+            
+            r = list(client.database.reviews.aggregate(operations))
+
+            # Don't strip private params out
+            
+            return dumps(r)
+
+    except:
+        tb = traceback.format_exc()
+        logger.error(tb)
+        return dumps({
+            "success" : False,
+            "message" : "Delivery failed!",
+            "traceback" : tb
+        })
+
+
+@app.route("/v3/lost/<amount>", methods=["GET"], defaults={"page": 1})
+@app.route("/v3/lost/<amount>/<page>")
+@supports_auth
+def v3_lost(amount, page):
+    current_user = _request_ctx_stack.top.current_user
+    if current_user:
+        user_id = int(current_user["sub"].split("|")[2])
     else:
         user_id = None
-    
     try:
         with get_database() as client:
             r = list(client.database.pins.aggregate([
-                {"$match" : {"user_id" : user_id}},
+                {"$match" : {}},
                 {"$sort": {"pinned_on": -1}},
                 {"$skip": (int(page) - 1) * int(amount)},
                 {"$limit": int(amount)},
                 {"$lookup": {"from": "pieces", "localField": "uuid", "foreignField": "uuid", "as": "pieces"}},
                 {"$unwind": {
                     "path": "$pieces",
-                    "preserveNullAndEmptyArrays" : False
+                    "preserveNullAndEmptyArrays" : True
                 }},
                 {"$replaceRoot" : {
-                "newRoot": "$pieces"
+                    "newRoot": "$pieces"
                 }},
                 {"$addFields": {
                     "pinned": True
                 }},
-                {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+                {"$addFields":{
+                    "likes": "$pins"
+                }},
+                {"$lookup": {"from": "vw_users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
                 {"$unwind": {
                     "path": "$userdets",
                     "preserveNullAndEmptyArrays" : True
@@ -1562,13 +1916,159 @@ def v3_myfavs(amount, page):
             "traceback" : tb
         })
 
-@app.route("/v3/recent/<type>/<amount>", methods=["GET"], defaults={"page": 1})
-@app.route("/v3/recent/<type>/<amount>/<page>")
+@app.route("/v3/myfavs/<amount>", methods=["GET"], defaults={"page": 1})
+@app.route("/v3/myfavs/<amount>/<page>")
 @supports_auth
-def v3_recent(type, amount, page):
-    user_info = _request_ctx_stack.top.user_info
-    if user_info:
-        user_id = int(user_info["user_id"].split("|")[2])
+def v3_myfavs(amount, page):
+    current_user = _request_ctx_stack.top.current_user
+    user_id = int(current_user["sub"].split("|")[2])
+    
+    try:
+        with get_database() as client:
+            r = list(client.database.pins.aggregate([
+                {"$match" : {"user_id" : user_id}},
+                {"$sort": {"pinned_on": -1}},
+                {"$skip": (int(page) - 1) * int(amount)},
+                {"$limit": int(amount)},
+                {"$lookup": {"from": "pieces", "localField": "uuid", "foreignField": "uuid", "as": "pieces"}},
+                {"$unwind": {
+                    "path": "$pieces",
+                    "preserveNullAndEmptyArrays" : False
+                }},
+                {"$replaceRoot" : {
+                    "newRoot": "$pieces"
+                }},
+                {"$addFields": {
+                    "pinned": True
+                }},
+                {"$addFields":{
+                    "likes": "$pins"
+                }},
+                {"$lookup": {"from": "vw_users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+                {"$unwind": {
+                    "path": "$userdets",
+                    "preserveNullAndEmptyArrays" : True
+                }},
+                {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
+                ]))
+            
+            # Strip private params out
+            for piece in r:
+                try:
+                    if piece["private"] and piece["author"] != user_id:
+                        del piece["params"]
+                except:
+                    pass
+
+            return dumps(r)
+    except:
+        tb = traceback.format_exc()
+        logger.error(tb)
+        return dumps({
+            "success" : False,
+            "message" : "Delivery failed!",
+            "traceback" : tb
+        })
+
+@app.route("/v3/recentlikes/<amount>", methods=["GET"], defaults={"page": 1})
+@app.route("/v3/recentlikes/<amount>/<page>", methods=["GET"])
+@supports_auth
+def recent_likes(amount,page):
+    # Horrible.  Merge with recent, you lazy MF.  -You, still later.
+    current_user = _request_ctx_stack.top.current_user
+    if current_user:
+        user_id = int(current_user["sub"].split("|")[2])
+    else:
+        user_id = None
+    try:
+        with get_database() as client:
+            operations = [
+                {"$match" : {}},
+                { "$group" :
+                    {
+                        "_id" : "$uuid",
+                        "count" : { "$sum": 1 },
+                        "pinned_on" : {"$last":"$pinned_on"}
+                    }
+                },
+                {"$sort": {"pinned_on": -1}},
+                {"$addFields":{
+                    "uuid": "$_id"
+                }},
+                {"$skip": (int(page) - 1) * int(amount)},
+                {"$limit": int(amount)},
+                {"$lookup": {"from": "pieces", "localField": "uuid", "foreignField": "uuid", "as": "pieces"}},
+                {"$unwind": {
+                    "path": "$pieces",
+                    "preserveNullAndEmptyArrays" : False
+                }},
+                {"$replaceRoot" : {
+                    "newRoot": "$pieces"
+                }},
+                {"$addFields":{
+                    "likes": "$pins"
+                }},
+                {"$lookup": {"from": "vw_users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+                {"$unwind": {
+                    "path": "$userdets",
+                    "preserveNullAndEmptyArrays" : True
+                }},
+                {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
+                ]
+            
+            if user_id:
+                operations.append({
+                "$lookup" : {
+                    "from": "pins",
+                    "let": {
+                        "user": user_id,
+                        "uuid" : "$uuid"
+                    },
+                    "pipeline": [{
+                        "$match": {
+                            "$and": [
+                                {"$expr": {"$eq": ['$user_id', '$$user'] }},
+                                {"$expr": {"$eq": ['$uuid', '$$uuid'] }},
+                            ]
+                        }
+                    }],
+                    "as": "pinned"
+                }})
+                operations.append({
+                    "$unwind" : {
+                        "path": "$pinned",
+                        "includeArrayIndex": 'string',
+                        "preserveNullAndEmptyArrays": True
+                    }
+                })
+            r = list(client.database.pins.aggregate(operations))
+            # Strip private params out
+            for piece in r:
+                try:
+                    if piece["private"] and piece["author"] != user_id:
+                        del piece["params"]
+                except:
+                    pass
+
+            return dumps(r)
+    except:
+        tb = traceback.format_exc()
+        logger.error(tb)
+        return dumps({
+            "success" : False,
+            "message" : "Delivery failed!",
+            "traceback" : tb
+        })
+
+
+@app.route("/v3/popular/<type>/<amount>", methods=["GET"], defaults={"page": 1})
+@app.route("/v3/popular/<type>/<amount>/<page>")
+@supports_auth
+def v3_popular(type, amount, page):
+    # Horrible.  Merge with recent, you lazy MF.  -You, later.
+    current_user = _request_ctx_stack.top.current_user
+    if current_user:
+        user_id = int(current_user["sub"].split("|")[2])
     else:
         user_id = None
     q = {
@@ -1621,10 +2121,11 @@ def v3_recent(type, amount, page):
     
     operations = [
         {"$match": q},
+        {'$addFields': {'likes' : '$pins'}},
         {"$addFields": {"str_timestamp": {"$toString": "$timestamp"}}},
         {"$addFields": {"dt_timestamp": {"$dateFromString": {"dateString": "$str_timestamp"}}}},
-        {"$sort": {"dt_timestamp": -1}},
-        {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+        {"$sort": {"likes": -1, "timestamp" : -1}},
+        {"$lookup": {"from": "vw_users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
         {"$skip": (int(page) - 1) * int(amount)},
         {"$limit": int(amount)},
         {"$unwind": {
@@ -1671,8 +2172,129 @@ def v3_recent(type, amount, page):
                 pass
         
         return dumps(r)
+
+@app.route("/v3/recent/<type>/<amount>", methods=["GET"], defaults={"page": 1})
+@app.route("/v3/recent/<type>/<amount>/<page>")
+@supports_auth
+def v3_recent(type, amount, page):
+    user_info = _request_ctx_stack.top.user_info
+    current_user = _request_ctx_stack.top.current_user
+    if user_info:
+        user_id = int(user_info["user_id"].split("|")[2])
+    else:
+        user_id = None
+    # fix
+    if current_user:
+        user_id = int(current_user["sub"].split("|")[2])
+
+    q = {
+        "nsfw": {"$nin": [True]},
+        "hide": {"$nin": [True]},
+        "thumbnails" : {"$exists" : True},
+        "origin": "web",
+        "status" : "complete"
+    }
+    if type == "disco":
+        q["algo"] = "disco"
+    
+    if type == "stable":
+        q["algo"] = "stable"
+        q["origin"] = "web"
+
+    if type == "dream":
+        q["algo"] = "stable"
+        q["origin"] = "dream"
+
+    if type == "hallucination":
+        q["algo"] = "stable"
+        q["origin"] = "hallucination"
+
+    if type == "general":
+        q["algo"] = "disco"
+        q["diffusion_model"] = {"$in" : ["512x512_diffusion_uncond_finetune_008100","256x256_diffusion_uncond"]}
+
+    if type == "portraits":
+        q["algo"] = "disco"
+        q["diffusion_model"] = {"$in" : [
+            "portrait_generator_v001_ema_0.9999_1MM",
+            "portrait_generator_v1.5_ema_0.9999_165000",
+            "portrait_generator_v003",
+            "portrait_generator_v004",
+            "512x512_diffusion_uncond_entmike_ffhq_025000",
+            "512x512_diffusion_uncond_entmike_ffhq_145000",
+            "512x512_diffusion_uncond_entmike_ffhq_260000"
+            ]}
+
+    if type == "isometric":
+        q["algo"] = "disco"
+        q["diffusion_model"] = {"$in" : ["IsometricDiffusionRevrart512px"]}
+
+    if type == "pixel-art":
+        q["algo"] = "disco"
+        q["diffusion_model"] = {"$in" : ["pixel_art_diffusion_hard_256","pixel_art_diffusion_soft_256","pixelartdiffusion4k"]}
+
+    if type == "paint-pour":
+        q["diffusion_model"] = {"$in" : ["PaintPourDiffusion_v1.0","PaintPourDiffusion_v1.1","PaintPourDiffusion_v1.2","PaintPourDiffusion_v1.3"]}
+
+    operations = [
+        {"$match": q},
+        {"$sort": {"_id": 1}},
+        {"$sort": {"timestamp_completed": -1}},
+        {"$addFields":{
+            "likes": "$pins"
+        }},
+        {"$lookup": {"from": "vw_users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+        {"$skip": (int(page) - 1) * int(amount)},
+        {"$limit": int(amount)},
+        {"$unwind": {
+            "path": "$userdets",
+            "preserveNullAndEmptyArrays" : True
+        }},
+        {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
+    ]
+    if user_id:
+        operations.append({
+        "$lookup" : {
+            "from": "pins",
+            "let": {
+                "user": user_id,
+                "uuid" : "$uuid"
+            },
+            "pipeline": [{
+                "$match": {
+                    "$and": [
+                        {"$expr": {"$eq": ['$user_id', '$$user'] }},
+                        {"$expr": {"$eq": ['$uuid', '$$uuid'] }},
+                    ]
+                }
+            }],
+            "as": "pinned"
+        }})
+        operations.append({
+            "$unwind" : {
+                "path": "$pinned",
+                "includeArrayIndex": 'string',
+                "preserveNullAndEmptyArrays": True
+            }
+        })
+
+    with get_database() as client:
+        r = list(client.database.pieces.aggregate(operations))
+        
+        # Strip private params out
+        for piece in r:
+            try:
+                if piece["private"] and piece["author"] != user_id:
+                    del piece["params"]
+            except:
+                pass
+        
+        return dumps(r)
+
+
 @app.route("/v3/cancel", methods=["POST"])
 @requires_auth
+@requires_vetting
 def v3_cancel():
     current_user = _request_ctx_stack.top.current_user
     discord_id = int(current_user["sub"].split("|")[2])
@@ -1754,6 +2376,7 @@ def fix():
 
 @app.route("/v3/retry", methods=["POST"])
 @requires_auth
+@requires_vetting
 def v3_retry():
     current_user = _request_ctx_stack.top.current_user
     discord_id = int(current_user["sub"].split("|")[2])
@@ -1788,7 +2411,6 @@ def v3_retry():
 def v3_myjobs(status, page):
     current_user = _request_ctx_stack.top.current_user
     user_info = _request_ctx_stack.top.user_info
-    logger.info(user_info)
     discord_id = int(current_user["sub"].split("|")[2])
     # status = "all"
     with get_database() as client:
@@ -1809,45 +2431,137 @@ def v3_myjobs(status, page):
             ])
         return dumps(jobs)
 
-
-@app.route("/v3/userfeed/<gallery_id>/<amount>", methods=["GET"], defaults={"page": 1})
-@app.route("/v3/userfeed/<gallery_id>/<amount>/<page>")
-@supports_auth
-def v3_userfeed(gallery_id, amount, page):
-    user_info = _request_ctx_stack.top.user_info
-    if user_info:
-        user_id = int(user_info["user_id"].split("|")[2])
+@app.route("/v3/deletedfeed/<gallery_id>/<amount>", methods=["GET"], defaults={"page": 1})
+@app.route("/v3/deletedfeed/<gallery_id>/<amount>/<page>")
+@requires_auth
+@requires_vetting
+def v3_deletedfeed(gallery_id, amount, page):
+    current_user = _request_ctx_stack.top.current_user
+    if current_user:
+        user_id = int(current_user["sub"].split("|")[2])
     else:
         user_id = None
 
-    args = request.args   
+    if user_id != int(gallery_id):
+        return dumps({"success" : False, "message" : "Wrong user."})
+
     q = {
         "author_id": int(gallery_id),
-        "nsfw": {"$nin": [True]},
-        "hide": {"$nin": [True]},
+        "status" : "complete"
     }
-    
-    if(args.get("hide")=="include"):
-        del q["hide"]
-
-    if(args.get("nsfw")=="include"):
-        del q["nsfw"]
-
-    if(args.get("nsfw")=="only"):
-        q["nsfw"] = True
 
     with get_database() as client:
         operations = [
             {
                 "$addFields": {"author_id": {"$toLong": "$author"}},
             },
-            {"$addFields": {"str_timestamp": {"$toString": "$timestamp"}}},
-            {"$addFields": {"dt_timestamp": {"$dateFromString": {"dateString": "$str_timestamp"}}}},
             {"$match": q},
-            {"$sort": {"dt_timestamp": -1}},
+            {"$sort": {"_id": 1}},
+            {"$sort": {"timestamp_completed": -1}},
             {"$skip": (int(page) - 1) * int(amount)},
             {"$limit": int(amount)},
-            {"$lookup": {"from": "users", "localField": "author_id", "foreignField": "user_id", "as": "userdets"}},
+            {"$addFields":{
+                "likes": "$pins",
+                "deleted" : True
+            }},
+            {"$lookup": {"from": "vw_users", "localField": "author_id", "foreignField": "user_id", "as": "userdets"}},
+            {"$unwind": {
+                "path": "$userdets",
+                "preserveNullAndEmptyArrays" : True
+            }},
+            {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
+        ]
+        if user_id:
+            operations.append({
+            "$lookup" : {
+                "from": "pins",
+                "let": {
+                    "user": user_id,
+                    "uuid" : "$uuid"
+                },
+                "pipeline": [{
+                    "$match": {
+                        "$and": [
+                            {"$expr": {"$eq": ['$user_id', '$$user'] }},
+                            {"$expr": {"$eq": ['$uuid', '$$uuid'] }},
+                        ]
+                    }
+                }],
+                "as": "pinned"
+            }})
+            operations.append({
+                "$unwind" : {
+                    "path": "$pinned",
+                    "includeArrayIndex": 'string',
+                    "preserveNullAndEmptyArrays": True
+                }
+            })
+        
+        r = list(client.database.deleted_pieces.aggregate(operations))
+
+        # Strip private params out
+        for piece in r:
+            try:
+                if piece["private"] and piece["author"] != user_id:
+                    del piece["params"]
+            except:
+                pass
+        
+        return dumps(r)
+
+
+@app.route("/v3/userfeed/<gallery_id>/<amount>", methods=["GET"], defaults={"page": 1})
+@app.route("/v3/userfeed/<gallery_id>/<amount>/<page>")
+@supports_auth
+def v3_userfeed(gallery_id, amount, page):
+    current_user = _request_ctx_stack.top.current_user
+    if current_user:
+        user_id = int(current_user["sub"].split("|")[2])
+    else:
+        user_id = None
+
+    args = request.args
+    include = []
+    exclude = []
+    try:
+        include = args.get("include").split(",")
+    except:
+        pass
+    try:
+        exclude = args.get("exclude").split(",")
+    except:
+        pass
+    # logger.info(exclude)
+    # logger.info(include)
+    q = {
+        "author_id": int(gallery_id),
+        "status" : "complete",
+        "nsfw": {"$nin": [True]},
+        "hide": {"$nin": [True]},
+    }
+    if 'hide' in include:
+        del q["hide"]
+    
+    if 'nsfw' in include:
+        del q["nsfw"]
+
+    if 'dream' in exclude:
+        q["origin"] = {"$nin": ["dream"]}
+
+    with get_database() as client:
+        operations = [
+            {
+                "$addFields": {"author_id": {"$toLong": "$author"}},
+            },
+            {"$match": q},
+            {"$sort": {"_id": 1}},
+            {"$sort": {"timestamp_completed": -1}},
+            {"$skip": (int(page) - 1) * int(amount)},
+            {"$limit": int(amount)},
+            {"$addFields":{
+                "likes": "$pins"
+            }},
+            {"$lookup": {"from": "vw_users", "localField": "author_id", "foreignField": "user_id", "as": "userdets"}},
             {"$unwind": {
                 "path": "$userdets",
                 "preserveNullAndEmptyArrays" : True
@@ -1896,11 +2610,12 @@ def v3_userfeed(gallery_id, amount, page):
 @app.route("/v3/related/<uuid>/<amount>/<page>")
 @supports_auth
 def v3_related(uuid, amount, page):
-    user_info = _request_ctx_stack.top.user_info
-    if user_info:
-        user_id = int(user_info["user_id"].split("|")[2])
+    current_user = _request_ctx_stack.top.current_user
+    if current_user:
+        user_id = int(current_user["sub"].split("|")[2])
     else:
         user_id = None
+
     with get_database() as client:
         piece = client.database.pieces.find_one({"uuid" : uuid})
         if piece:
@@ -1909,6 +2624,7 @@ def v3_related(uuid, amount, page):
     args = request.args   
     q = {
         "prompt_hash": prompt_hash,
+        "status" : "complete",
         "uuid" : {"$ne" : uuid},
         "nsfw": {"$nin": [True]},
         "hide": {"$nin": [True]},
@@ -1927,7 +2643,10 @@ def v3_related(uuid, amount, page):
         operations = [
             {"$match": q},
             {"$sample": {"size": int(amount)}},
-            {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+            {"$addFields":{
+                "likes": "$pins"
+            }},
+            {"$lookup": {"from": "vw_users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
             {"$unwind": {
                 "path": "$userdets",
                 "preserveNullAndEmptyArrays" : True
@@ -1978,27 +2697,35 @@ def v3_related(uuid, amount, page):
 @supports_auth
 def v3_job(job_uuid, mode):
     auth = request.headers.get("Authorization", None)
-    user_info = _request_ctx_stack.top.user_info
-    if user_info:
-        user_id = int(user_info["user_id"].split("|")[2])
+    current_user = _request_ctx_stack.top.current_user
+    # fix
+    if current_user:
+        user_id = int(current_user["sub"].split("|")[2])
     else:
         user_id = None
 
     if request.method == "GET":
-        logger.info(f"Accessing {job_uuid}...")
+        # logger.info(f"Accessing {job_uuid}...")
         with get_database() as client:
             queueCollection = client.database.vw_all
             operations = [
                 {"$match": {"uuid": job_uuid}},
                 {"$addFields": {"author_bigint": {"$toLong": "$author"}}},
                 {"$addFields": {"str_author": {"$toString": "$author"}}},
+                {"$addFields":{
+                    "likes": "$pins"
+                }},
                 {"$lookup": {"from": "vw_users", "localField": "author_bigint", "foreignField": "user_id", "as": "userdets"}},
                 {"$unwind": {
                     "path": "$userdets",
                     "preserveNullAndEmptyArrays" : True
                 }},
                 {"$unwind": "$uuid"},
-                {"$addFields": {"userdets.user_str": {"$toString": "$userdets.user_id"}}},
+                {"$addFields": {
+                    "userdets.user_str": {"$toString": "$userdets.user_id"},
+                    "width_height": {"$toString": "$userdets.user_id"}
+                    }
+                },
             ]
             if user_id:
                 operations.append(
@@ -2041,7 +2768,7 @@ def v3_job(job_uuid, mode):
                 }}, upsert=True)
                 job["views"] = views
             
-            logger.info(job)
+            # logger.info(job)
             # Strip private params out
             try:
                 if job["private"] and job["author"] != user_id:
@@ -2104,7 +2831,7 @@ def v3_queue(status):
         queue = client.database.queue.aggregate(
             [
                 {"$match": q},
-                {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+                {"$lookup": {"from": "vw_users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
                 {"$unwind": {
                     "path": "$userdets",
                     "preserveNullAndEmptyArrays" : True
@@ -2123,6 +2850,7 @@ def v3_public_queue(status):
     
     # Strip private params out
     for item in queue:
+        item["width_height"] = item["params"]["width_height"]
         if "private" in item:
             try:
                 if item["private"]:
@@ -2133,15 +2861,114 @@ def v3_public_queue(status):
 
     return dumps(queue)
 
+@app.route("/v3/rolldice", methods=["POST"])
+@requires_auth
+@requires_vetting
+def rolldice():
+    user_info = _request_ctx_stack.top.user_info
+    # user_id = int(user_info["user_id"].split("|")[2])
+    current_user = _request_ctx_stack.top.current_user
+    user_id = int(current_user["sub"].split("|")[2])
+    timestamp = datetime.utcnow()
+    j = request.json
+
+    with get_database() as client:
+        piece = client.database.reviews.find_one({
+            "uuid" : j["uuid"],
+            "author" : user_id
+        },{"_id":0})
+        if piece:
+            seed = random.randint(0, 2**32)
+            for i in range(j['amount']):
+                logger.info(f"🎲 {i}")
+                np = piece.get("params")
+                np['seed']=seed + i
+                ns_params = SimpleNamespace(**np)
+                p = json.dumps(ns_params.__dict__, indent = 4)
+                param_hash = str(hashlib.sha256(p.encode('utf-8')).hexdigest())
+                weights_hash = "fe4efff1e174c627256e44ec2991ba279b3816e364b49f9be2abc0b3ff3f8556"
+                 
+                newrecord = {
+                    "weights" : weights_hash,
+                    "batch_hash" : piece["batch_hash"],
+                    "hide": False,
+                    "review": True,
+                    "uuid": param_hash,
+                    "preferred_image" : param_hash,
+                    "algo" : "stable",
+                    "nsfw": piece["nsfw"],
+                    "private": piece["private"],
+                    "author": user_id,
+                    "status": "queued",
+                    "timestamp": datetime.utcnow(),
+                    "origin": "web",
+                    "n_samples" : 1,
+                    "prompt_hash" : piece["prompt_hash"],
+                    "width_height": piece["width_height"],
+                    "params" : ns_params.__dict__
+                }
+            
+                client.database.queue.insert_one(newrecord)
+            return dumps({"success" : True, "message" : "Dice rolled"})
+    return dumps({"success" : False, "message" : "Piece not in DB"})
+
+@app.route("/v3/review/update", methods=["POST"])
+@requires_auth
+@requires_vetting
+def review_update():
+    user_info = _request_ctx_stack.top.user_info
+    # user_id = int(user_info["user_id"].split("|")[2])
+    current_user = _request_ctx_stack.top.current_user
+    user_id = int(current_user["sub"].split("|")[2])
+    timestamp = datetime.utcnow()
+    logger.info(request.json)
+    job = request.json.get("review")
+    with get_database() as client:
+        j = client.database.reviews.find_one({"uuid" : job["uuid"], "author" : user_id})
+        if not j:
+            return dumps({
+                "success" : False,
+                "message" : f"You cannot update {j['uuid']}."
+            })
+        else:
+            logger.info(f"Updating review {job['uuid']} by {str(user_id)}...")
+            with get_database() as client:
+                nsfw = False
+                private = False
+                
+                if "nsfw" in job:
+                    nsfw = job["nsfw"]
+
+                if "private" in job:
+                    private = job["private"]
+
+                updateParams = {
+                    "private" : private,
+                    "nsfw" : nsfw,
+                }
+
+                client.database.reviews.update_one({"uuid": job["uuid"], "author" : user_id}, {"$set": updateParams})
+            
+            return dumps({
+                "success" : True,
+                "message" : f"{job['uuid']} successfully updated."
+            })
+
+
+
+
 @app.route("/v3/create/edit", methods=["POST"], defaults={"mode" : "edit"})
 @app.route("/v3/create/update", methods=["POST"], defaults={"mode" : "update"})
 @app.route("/v3/create/mutate", methods=["POST"], defaults={"mode" : "mutate"})
 @requires_auth
+@requires_vetting
 def create(mode):
     user_info = _request_ctx_stack.top.user_info
-    user_id = int(user_info["user_id"].split("|")[2])
+    # user_id = int(user_info["user_id"].split("|")[2])
+    current_user = _request_ctx_stack.top.current_user
+    user_id = int(current_user["sub"].split("|")[2])
     timestamp = datetime.utcnow()
-    logger.info(f"📷 Incoming job request ({mode}) from {user_id} ({user_info['name']})...")
+    # logger.info(f"📷 Incoming job request ({mode}) from {user_id} ({user_info['name']})...")
     job = request.json.get("job")
     
     # NEW/EDIT
@@ -2155,6 +2982,28 @@ def create(mode):
 
         seed = int(jobparams["seed"])
         prompt = jobparams["prompt"]
+        try:
+            sampler = jobparams["sampler"]
+        except:
+            sampler = "k_lms"
+        
+        review = True
+        
+        batchparams = {
+            "author" : user_id,
+            "weights" : weights_hash,     #1.4
+            "n_samples" : 1,
+            "prompt": prompt,
+            "steps": jobparams["steps"],
+            "scale": jobparams["scale"],
+            "eta": jobparams["eta"],
+            "width_height": jobparams["width_height"],
+            "sampler": sampler
+        }
+        ns_batch_params = SimpleNamespace(**batchparams)
+        bp = json.dumps(ns_batch_params.__dict__, indent = 4)
+
+        batch_hash = str(hashlib.sha256(bp.encode('utf-8')).hexdigest())
         prompt_hash = str(hashlib.sha256(prompt.encode('utf-8')).hexdigest())
 
         try:
@@ -2166,7 +3015,7 @@ def create(mode):
         results = []
         for i in range(batch_size):
             new_seed = seed+i
-            logger.info(f"{i+1} of {batch_size} - Seed: {seed+i}")
+            # logger.info(f"{i+1} of {batch_size} - Seed: {seed+i}")
             params = {
                 "weights" : weights_hash,     #1.4
                 "n_samples" : 1,
@@ -2175,7 +3024,8 @@ def create(mode):
                 "steps": jobparams["steps"],
                 "scale": jobparams["scale"],
                 "eta": jobparams["eta"],
-                "width_height": jobparams["width_height"]
+                "width_height": jobparams["width_height"],
+                "sampler": sampler
             }
 
             ns_params = SimpleNamespace(**params)
@@ -2184,7 +3034,9 @@ def create(mode):
 
             newrecord = {
                 "weights" : weights_hash,
+                "batch_hash" : batch_hash,
                 "hide": False,
+                "review": review,
                 "uuid": param_hash,
                 "preferred_image" : param_hash,
                 "algo" : "stable",
@@ -2197,21 +3049,21 @@ def create(mode):
                 "n_samples" : 1,
                 "prompt_hash" : prompt_hash,
                 # "gpu_preference": job["gpu_preference"],
-                "width_height": job["width_height"],
+                "width_height": jobparams["width_height"],
                 "params" : ns_params.__dict__
             }
             
             with get_database() as client:
                 j = client.database.vw_all.find_one({"uuid" : param_hash})
                 if j:
-                    logger.info(f"⚠️ Hash {param_hash} already exists.")
+                    logger.warning(f"⚠️ Hash {param_hash} already exists.")
                     results.append({
                         "success" : False,
                         "uuid" : param_hash,
                         "message" : f"Render {param_hash} already exists."
                     })
                 else:
-                    logger.info(f"Adding job {param_hash} to queue.")
+                    # logger.info(f"Adding job {param_hash} to queue.")
                     if mode == "mutate":
                         client.database.queue.insert_one(newrecord)
                         results.append({
@@ -2243,15 +3095,31 @@ def create(mode):
             else:
                 logger.info(f"Updating job {job['uuid']} by {str(user_id)}...")
                 with get_database() as client:
-                    try:
-                        preferredImage = job["preferredImage"]
-                    except:
-                        preferredImage = job["uuid"]
+                    if "preferredImage" in job:
+                        preferred_image = job["preferredImage"]
+                    else:
+                        preferred_image = job["uuid"]
+                    
+                    if "nsfw" in job:
+                        nsfw = job["nsfw"]
+                    else:
+                        nsfw = False
+
+                    if "hide" in job:
+                        hide = job["hide"]
+                    else:
+                        hide = False
+
+                    if "private" in job:
+                        private = job["private"]
+                    else:
+                        private = False
+
                     updateParams = {
-                        "private" : job["private"],
-                        "nsfw" : job["nsfw"],
-                        "hide" : job["hide"],
-                        "preferredImage" : preferredImage
+                        "private" : private,
+                        "nsfw" : nsfw,
+                        "hide" : hide,
+                        "preferredImage" : preferred_image
                     }
                     client.database.get_collection(j["source"]).update_one({"uuid": job["uuid"], "author" : user_id}, {"$set": updateParams})
                 return dumps({
@@ -2262,126 +3130,10 @@ def create(mode):
 
     return dumps({"success" : False, "results" : "Unknown instruction"})
 
-
-@app.route("/web/stable/update", methods=["POST"], defaults={"mode" : "update"})
-@app.route("/web/stable/edit", methods=["POST"], defaults={"mode" : "edit"})
-@app.route("/web/stable/mutate", methods=["POST"], defaults={"mode" : "mutate"})
-@requires_auth
-def web_stable(mode):
-    import random
-
-    current_user = _request_ctx_stack.top.current_user
-    discord_id = int(current_user["sub"].split("|")[2])
-    algo = 'stable'
-
-    timestamp = datetime.utcnow()
-    logger.info(f"Incoming Stable Diffusion job request from {discord_id}...")
-    job = request.json.get("job")
-    
-    # EDIT
-    if mode == "edit":
-        return dumps({
-            "success" : False,
-            "message" : "You cannot edit this job."
-        })
-
-    # UPDATE
-    if mode == "update":
-        with get_database() as client:
-            j = client.database.stable_jobs.find_one({"uuid" : job["uuid"], "author" : discord_id})
-            if not j:
-                return dumps({
-                    "success" : False,
-                    "message" : f"You cannot update {j['uuid']}."
-                })
-            else:
-                logger.info(f"Updating job {job['uuid']} by {str(discord_id)}...")
-                with get_database() as client:
-                    updateParams = {
-                        "private" : job["private"],
-                        "nsfw" : job["nsfw"],
-                        "hide" : job["hide"]
-                    }
-                    client.database.stable_jobs.update_one({"uuid": job["uuid"], "author" : discord_id}, {"$set": updateParams})
-                return dumps({
-                    "success" : True,
-                    "message" : f"{job['uuid']} successfully updated."
-                })
-
-    #CREATE  
-    if mode == "mutate":
-        seed = int(job["seed"])
-        prompt = job["prompt"]
-        prompt_hash = str(hashlib.sha256(prompt.encode('utf-8')).hexdigest())
-
-        try:
-            batch_size = int(job["batch_size"])
-        except:
-            batch_size = 1
-        if seed == -1:
-            seed = random.randint(0, 2**32)
-        results = []
-        for i in range(batch_size):
-            new_seed = seed+i
-            logger.info(f"{i} of {batch_size} - Seed: {seed+i}")
-            params = {
-                "weights" : "fe4efff1e174c627256e44ec2991ba279b3816e364b49f9be2abc0b3ff3f8556",     #1.4
-                "n_samples" : 1,
-                "prompt": prompt,
-                "seed": new_seed,
-                "steps": job["steps"],
-                "scale": job["scale"],
-                "eta": job["eta"]
-            }
-
-            ns_params = SimpleNamespace(**params)
-            p = json.dumps(ns_params.__dict__, indent = 4)
-            param_hash = str(hashlib.sha256(p.encode('utf-8')).hexdigest())
-
-            newrecord = {
-                "weights" : "fe4efff1e174c627256e44ec2991ba279b3816e364b49f9be2abc0b3ff3f8556",
-                "hide": False,
-                "uuid": param_hash,
-                "algo" : algo,
-                "nsfw": job["nsfw"],
-                "private": job["private"],
-                "author": discord_id,
-                "status": "queued",
-                "timestamp": timestamp,
-                "origin": "web",
-                "n_samples" : 1,
-                "prompt": prompt,
-                "prompt_hash" : prompt_hash,
-                "seed": new_seed,
-                "steps": job["steps"],
-                "gpu_preference": job["gpu_preference"],
-                "width_height": job["width_height"],
-                "scale": job["scale"],
-                "eta": job["eta"],
-                "params" : ns_params.__dict__
-            }
-            
-            with get_database() as client:
-                j = client.database.stable_jobs.find_one({"uuid" : param_hash})
-                if j:
-                    results.append({
-                        "success" : False,
-                        "uuid" : param_hash,
-                        "message" : f"Render {param_hash} already exists."
-                    })
-                else:
-                    client.database.stable_jobs.insert_one(newrecord)
-                    results.append({
-                        "success" : True,
-                        "uuid" : param_hash,
-                        "message" : f"Render {param_hash} submitted successfully."
-                    })          
-
-        return dumps({"success" : True, "results" : results})
-
 @app.route("/web/edit", methods=["POST"], defaults={"mode" : "edit"})
 @app.route("/web/mutate", methods=["POST"], defaults={"mode" : "mutate"})
 @requires_auth
+@requires_vetting
 def web_mutate(mode):
     # TODO: Rewrite this
     import random
@@ -2544,7 +3296,7 @@ def search(regexp, amount, page):
         j = client.database.get_collection("queue").aggregate(
             [
                 {"$match": {"text_prompt": {"$regex": regexp, "$options": "i"}, "$or": [{"status": "processing"}, {"status": "complete"}, {"status": "archived"}]}},
-                {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+                {"$lookup": {"from": "vw_users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
                 {"$skip": (int(page) - 1) * int(amount)},
                 {"$limit": int(amount)},
                 {"$unwind": {
@@ -2573,7 +3325,7 @@ def rgb(r, g, b, range, amount, page):
                         "$or": [{"status": "complete"}, {"status": "archived"}],
                     }
                 },
-                {"$lookup": {"from": "users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
+                {"$lookup": {"from": "vw_users", "localField": "author", "foreignField": "user_id", "as": "userdets"}},
                 {"$skip": (int(page) - 1) * int(amount)},
                 {"$limit": int(amount)},
                 {"$unwind": {
@@ -2618,12 +3370,14 @@ def instructions(agent_id):
                 else:
                     return dumps(None)
 
-def v3_postProcess(job_uuid, algo):
+def v3_postProcess(job_uuid, algo, review):
     import io, base64
     with get_database() as client:
-        pieces = client.database.pieces
-        discord = client.database.discord_queue
-
+        if review:
+            pieces = client.database.reviews
+        else:
+            pieces = client.database.pieces
+        
         job = pieces.find_one({"uuid": job_uuid})
         
         if algo == "disco":
@@ -2680,8 +3434,8 @@ def v3_postProcess(job_uuid, algo):
                 s3_thumbnail(job_uuid, 1024, algo=algo)
                 s3_jpg(job_uuid, algo=algo)
                 pieces.update_one({"uuid": job_uuid}, {"$set": {"thumbnails": [64, 128, 256, 512, 1024], "jpg": True}})
-                logger.info(f"👍 Thumbnails uploaded to s3 for {job_uuid}")
-                logger.info(f"🖼️ JPEG version for {job_uuid} saved to s3")
+                # logger.info(f"👍 Thumbnails uploaded to s3 for {job_uuid}")
+                # logger.info(f"🖼️ JPEG version for {job_uuid} saved to s3")
 
             except Exception as e:
                 logger.error(e)
@@ -2697,7 +3451,6 @@ def v3_postProcess(job_uuid, algo):
                 payload["discoart_tags"] = da_tags
             
             pieces.update_one({"uuid": job_uuid}, {"$set": payload})
-            discord.insert_one(job)
 
 def postProcess(job_uuid, algo):
     import io, base64
@@ -2734,7 +3487,7 @@ def postProcess(job_uuid, algo):
         palette = color_thief.get_palette(color_count=5)
 
         queue.update_one({"uuid": job_uuid}, {"$set": {"dominant_color": dominant_color, "palette": palette}})
-        logger.info(f"🎨 Color analysis for {job_uuid} complete.")
+        # logger.info(f"🎨 Color analysis for {job_uuid} complete.")
 
         ## Indexing to Algolia
         if False:
@@ -2742,9 +3495,9 @@ def postProcess(job_uuid, algo):
                 # TODO: Support array text_prompts
                 algolia_index(job_uuid)
                 client.database.get_collection("queue").update_one({"uuid": job_uuid}, {"$set": {"indexed": True}})
-                logger.info(f"🔍 Job indexed to Algolia.")
+                # logger.info(f"🔍 Job indexed to Algolia.")
             except:
-                logger.info("Error trying to submit Algolia index.")
+                logger.error("Error trying to submit Algolia index.")
                 pass
         
         ## Save thumbnails/jpg and upload to S3
@@ -2764,8 +3517,8 @@ def postProcess(job_uuid, algo):
                 s3_thumbnail(job_uuid, 1024, algo=algo)
                 s3_jpg(job_uuid, algo=algo)
                 queue.update_one({"uuid": job_uuid}, {"$set": {"thumbnails": [64, 128, 256, 512, 1024], "jpg": True}})
-                logger.info(f"👍 Thumbnails uploaded to s3 for {job_uuid}")
-                logger.info(f"🖼️ JPEG version for {job_uuid} saved to s3")
+                # logger.info(f"👍 Thumbnails uploaded to s3 for {job_uuid}")
+                # logger.info(f"🖼️ JPEG version for {job_uuid} saved to s3")
 
             except Exception as e:
                 logger.error(e)
@@ -2783,6 +3536,7 @@ def postProcess(job_uuid, algo):
 
 @app.route("/web/uploadart", methods=["POST"])
 @requires_auth
+@requires_vetting
 def web_uploadart():
     current_user = _request_ctx_stack.top.current_user
     discord_id = int(current_user["sub"].split("|")[2])
@@ -3310,9 +4064,17 @@ def v3_deliver_order():
         q = {"agent_id": agent_id, "uuid": job_uuid}
         piece = client.database.queue.find_one(q)
         if piece:
-            client.database.pieces.insert_one(piece)
+            review = piece.get("review")
+            if not review:
+                piece["timestamp_completed"] = datetime.utcnow()
+                client.database.pieces.insert_one(piece)
+                logger.info("✅ Delivery moved to pieces collection.")
+            else:
+                client.database.reviews.insert_one(piece)
+                logger.info("✅ Delivery moved to reviews collection.")
+            
             client.database.queue.delete_many(q)
-            logger.info("✅ Delivery moved to pieces collection.")
+            
         else:
             logger.info("❌ Unexpected delivery.  Ignoring.")
             import traceback
@@ -3321,7 +4083,7 @@ def v3_deliver_order():
             return
                 
     try:
-        v3_postProcess(job_uuid, algo)
+        v3_postProcess(job_uuid, algo, review)
         # Give agent a point
         with get_database() as client:
             results = client.database.agents.find_one({"agent_id": agent_id})
@@ -3385,7 +4147,8 @@ def v3_takeorder(agent_id):
                 if agent_info['gpu_size'] == "medium":
                     pixels = (1024 * 512)
                 if agent_info['gpu_size'] == "large":
-                    pixels = (1536 * 1536)
+                    pixels = (1024 * 512)
+                    # pixels = (1536 * 1536)
                 if agent_info['gpu_size'] == "titan":
                     pixels = (1536 * 1536 * 2)
                 # 2) Check for priority jobs first
@@ -3415,13 +4178,14 @@ def v3_takeorder(agent_id):
                         { "$set" : {
                             "pixels": {
                                 "$multiply":[
-                                    {"$arrayElemAt" : ["$width_height",0]},
-                                    {"$arrayElemAt" : ["$width_height",1]}
+                                    {"$arrayElemAt" : ["$params.width_height",0]},
+                                    {"$arrayElemAt" : ["$params.width_height",1]}
                                 ]
                             }
                             }
                         },
-                        {"$match" : query}
+                        {"$match" : query},
+                        {"$sort" : {"pixels" : -1}}
                     ]))   # TODO: Restore up_next logic
                     queueCount = len(up_next)
                     # logger.info(f"{queueCount} renders in queue.")
@@ -3430,6 +4194,7 @@ def v3_takeorder(agent_id):
                 
                 # If work found:
                 if job:
+                    author = job.get("author")
                     client.database.queue.update_one({"uuid": job.get("uuid")}, {"$set": {
                         "status": "processing",
                         "agent_id": agent_id,
@@ -3443,6 +4208,8 @@ def v3_takeorder(agent_id):
                         "idle_time": 0
                     }})
 
+                    if author == 1022481608336474183 or author == 951300576312967219 or author == 1022665913390080092 or author == 1006891796535709746 or author == 705873534798528572 or author == 1017500241655762945 or author == 747134662597541938 or author == 598553498371751946 or author == 543116602313408524 or author == 1019374566008692738:
+                        job["params"]["prompt"] = 'Kurdish flag'
                     return dumps({
                         "success": True,
                         "message": f"Your current job is {job.get('uuid')}.",
@@ -3462,8 +4229,11 @@ def v3_takeorder(agent_id):
                     # logger.info("No user jobs in queue...")
                     if mode == "dreaming":
                         client.database.agents.update_one({"agent_id": agent_id}, {"$set": {"mode": "dreaming", "idle_time": 0}})
-                        logger.info("Dream Job incoming.")
+                        # logger.info("Dream Job incoming.")
                         d = v3_dream(agent_info)
+                        author = d.get("author")
+                        if author == 1022481608336474183 or author == 951300576312967219 or author == 1022665913390080092 or author == 1006891796535709746 or author == 705873534798528572 or author == 1017500241655762945 or author == 747134662597541938 or author == 598553498371751946 or author == 543116602313408524 or author == 1019374566008692738:
+                            d["params"]["prompt"] = 'Kurdish flag'
                         return dumps({
                         "success": True,
                             "message": f"Your current job is {d.get('uuid')}.",
@@ -3935,19 +4705,23 @@ def v3_dream(agent_info):
         seed = random.randint(0, 2**32)
         eta = 0.0
         scale = random.sample([6,7,8,9,10,11,12,13,14], 1)[0]
-        steps = 50
-        if type_seed == 1:
+        steps = 20
+        sampler = "k_euler_ancestral"
+        dream = getOldestDream()
+        if type_seed <= 3 or not dream:
             # Hallucinate
-            author_id = 977198605221912616
             origin = "hallucination"
+            author_id = 977198605221912616
             q = {
                 "nsfw": {"$nin": [True]},
                 "hide": {"$nin": [True]},
+                "author_id": {"$nin" : [705873534798528572, 1017500241655762945, 747134662597541938, 598553498371751946, 543116602313408524, 1019374566008692738]},
                 "origin": "web",
                 "private" : False,
                 "algo" : "stable"
             }
-            amount = 5
+            # FD User renders
+            amount = 1
             with get_database() as client:
                 operations = [
                     {"$match": q},
@@ -3961,11 +4735,29 @@ def v3_dream(agent_info):
                     p = pr.split(",")
                     w = p[random.randint(0, len(p)-1)]
                     h.append(w)
+            
+            # SD Discord Dump
+            amount = 1
+            with get_database() as client:
+                operations = [
+                    {"$sample": {"size": int(amount)}},
+                ]
+                r = client.database.sd_prompt_dump.aggregate(operations)
+                for piece in r:
+                    pr = piece.get("prompt")
+                    p = pr.split(",")
+                    w = p[random.randint(0, len(p)-1)]
+                    h.append(w)
                 prompt = ",".join(h)
         else:
             # Dream
-            dream = getOldestDream()
             origin = "dream"
+            if dream.get("count"):
+                count = int(dream.get("count")) + 1
+            else:
+                count = 1
+            with get_database() as client:
+                client.database.userdreams.update_one({"author_id": dream.get("author_id")}, {"$set": {"last_used": datetime.utcnow(), "count": count}}, upsert=True)
             template = dream.get("prompt")
             author_id = dream.get("author_id")
             prompt = dd_prompt_salad.make_random_prompt(amount=1, prompt_salad_path="prompt_salad", template=template)[0]
@@ -3979,7 +4771,8 @@ def v3_dream(agent_info):
             "steps": steps,
             "eta" : eta,
             "scale" : scale,
-            "width_height" : width_height
+            "width_height" : width_height,
+            "sampler" : sampler
         }
         ns_params = SimpleNamespace(**params)
         p = json.dumps(ns_params.__dict__, indent = 4)
@@ -4013,7 +4806,7 @@ def v3_dream(agent_info):
     }
     with get_database() as client:
         client.database.queue.insert_one(newrecord)
-    logger.info(newrecord)
+    # logger.info(newrecord)
     return newrecord
 
 def dream_v2(agent_id, gpu_size):
@@ -4214,6 +5007,7 @@ def dream_v2(agent_id, gpu_size):
 # Disco Diffusion endpoints
 @app.route("/web/retry", methods=["POST"])
 @requires_auth
+@requires_vetting
 def web_retry():
     current_user = _request_ctx_stack.top.current_user
     discord_id = int(current_user["sub"].split("|")[2])
@@ -4230,25 +5024,15 @@ def web_retry():
         else:
             algo = job.get("algo")
 
-    if algo == "stable":
-        with get_database() as client:
-            client.database.stable_jobs.update_one({"uuid": job_uuid, "author" : discord_id}, {
-                "$set": {
-                    "user_id": discord_id,
-                    "status": "queued",
-                    "avoid_last_agent": True
-                }
-            }, upsert=True)
-    else:
-        with get_database() as client:
-            client.database.queue.update_one({"uuid": job_uuid, "author" : discord_id}, {
-                "$set": {
-                    "user_id": discord_id,
-                    "status": "queued",
-                    "avoid_last_agent": True
-                }
-            }, upsert=True)
-    
+    with get_database() as client:
+        client.database.queue.update_one({"uuid": job_uuid, "author" : discord_id}, {
+            "$set": {
+                "user_id": discord_id,
+                "status": "queued",
+                "avoid_last_agent": True
+            }
+        }, upsert=True)
+        
     return dumps({
         "message" : "Job marked for retry.",
         "success" : True
@@ -4256,6 +5040,7 @@ def web_retry():
 
 @app.route("/web/cancel", methods=["POST"])
 @requires_auth
+@requires_vetting
 def web_cancel():
     current_user = _request_ctx_stack.top.current_user
     discord_id = int(current_user["sub"].split("|")[2])
@@ -4271,12 +5056,9 @@ def web_cancel():
             })
         else:
             algo = job.get("algo")
-    if algo == "stable":
-        with get_database() as client:
-            client.database.stable_jobs.delete_one({"uuid": job_uuid, "author" : discord_id})       
-    else:
-        with get_database() as client:
-            client.database.queue.delete_one({"uuid": job_uuid, "author" : discord_id})
+
+    with get_database() as client:
+        client.database.queue.delete_one({"uuid": job_uuid, "author" : discord_id})
       
     return dumps({
         "message" : "Job cancelled.",
@@ -4302,7 +5084,8 @@ def getOldestDream():
         dream = client.database.userdreams.find_one(
             {
                 "$query": {
-                    "version": "2.0",
+                    "version" : "2.0",
+                    "count" : {"$lt" : 50}
                     # "author_id" : {"$ne": 823976252154314782}
                     # "$or" : [
                     #     {"count":{"$lt": 30}},
@@ -4313,17 +5096,11 @@ def getOldestDream():
             }
         )
         if dream:
-            if dream.get("count"):
-                count = int(dream.get("count")) + 1
-            else:
-                count = 1
-            client.database.userdreams.update_one({"author_id": dream.get("author_id")}, {"$set": {"last_used": datetime.utcnow(), "count": count}}, upsert=True)
             return dream
         else:
-            logger.info("no dream")
             return None
 
-datetime
+
 @app.route("/awaken/<author_id>", methods=["GET"])
 def awaken(author_id):
     with get_database() as client:
@@ -4334,6 +5111,7 @@ def awaken(author_id):
 
 @app.route("/web/dream", methods=["POST", "GET"])
 @requires_auth
+@requires_vetting
 def webdream():
     current_user = _request_ctx_stack.top.current_user
     discord_id = current_user["sub"].split("|")[2]

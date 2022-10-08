@@ -265,6 +265,7 @@ async def processCompletedJobs():
                 algo = completedJob.get("algo")
                 origin = completedJob.get("origin")
                 nsfw = completedJob.get("nsfw")
+                render_type = completedJob.get("render_type")
                 
                 if algo == "disco":
                     channel = "disco-images"
@@ -311,15 +312,22 @@ async def processCompletedJobs():
                         settings = ""
                         if not completedJob.get('private'):
                             params = completedJob.get('params')
-                            settings = f"\n`{params['prompt']}`\nSeed: `{params['seed']}` | Steps: `{params['steps']}` | Scale: `{params['scale']}` | ETA: `{params['eta']}`"
+                            sampler = "k_lms" # default
+                            try:
+                                sampler = params['sampler']
+                            except:
+                                pass
+                            if algo=='stable':
+                                settings = f"\n`{params['prompt']}`\nSeed: `{params['seed']}` | Steps: `{params['steps']}` | Scale: `{params['scale']}` | ETA: `{params['eta']}` | Sampler: `{sampler}`"
+                            else:
+                                settings = '`TBD`'
                             
                         msg_id = await channel.send(f"<@{completedJob.get('author')}>{settings}\nhttps://www.feverdreams.app/piece/{completedJob.get('uuid')}")
+                        updateJob({"uuid": completedJob.get("uuid"), "discord_message_id": msg_id.id, "discord_channel_id": channel.id})
                     except Exception as e:
                         tb = traceback.format_exc()
                         await channel.send(f"💀 Cannot display {completedJob.get('uuid')}\n`{tb}`")
-                
-                
-                updateJob({"uuid": completedJob.get("uuid"), "discord_message_id": msg_id.id, "discord_channel_id": channel.id})
+
                 
 
 
