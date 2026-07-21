@@ -41,7 +41,7 @@ load_dotenv()
 
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER")
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "log", "lz4"}
-MAX_DREAM_OCCURENCE = os.getenv("MAX_DREAM_OCCURENCE")
+MAX_DREAM_OCCURRENCE = os.getenv("MAX_DREAM_OCCURRENCE")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_STALL_TIMEOUT = 120
@@ -5160,4 +5160,3 @@ def handle_auth_error(ex):
     response = jsonify(ex.error)
     response.status_code = ex.status_code
     return response
-
